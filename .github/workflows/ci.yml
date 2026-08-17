@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: "./scripts"
+          severity: warning
+
+  python:
+    name: Python syntax + CLI smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile check
+        run: python -m compileall -q scripts/
+      - name: Benchmark CLI imports
+        run: |
+          python scripts/bench/bench_agent_trace.py --help >/dev/null
+          python scripts/bench/bench_session_concurrency.py --help >/dev/null
+          python scripts/bench/bench_tool_roundtrip.py --help >/dev/null
+          python scripts/bench/bench_ttft_isolation.py --help >/dev/null
+
+  markdown-lint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: "README.md docs/**/*.md CONTRIBUTING.md"
