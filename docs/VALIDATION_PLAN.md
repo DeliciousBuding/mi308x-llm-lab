@@ -8,7 +8,7 @@
 ## Gate G0: System check (no model)
 
 ```bash
-ssh dsw-amd 'python3 -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_memory//1e9, \"GB\")"'
+ssh <gpu-host> 'python3 -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_memory//1e9, \"GB\")"'
 rocm-smi --showproductname
 # Check: NUMA balancing, transparent hugepage, GPU power limit
 cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo "n/a"

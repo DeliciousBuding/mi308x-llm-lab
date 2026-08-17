@@ -13,14 +13,14 @@
 
 </div>
 
-> **Status: preparation / pre-deployment.** This repository is a researched
-> serving recipe and benchmark harness for Qwen3.8-27B on the same 192 GB
-> gfx942 hardware validated for DeepSeek-V4-Flash-0731. Performance numbers in
-> `docs/PERFORMANCE.md` are **estimated targets**, not validated measurements.
-> The concurrency analysis in `docs/RESEARCH_NOTES.md` is a structured estimate
-> (±40% confidence) pending real-machine validation. AMD announced Day-0
-> support for Qwen 3.8 on MI300X/MI325X/MI355X on 2026-08-12; this recipe ports
-> that to the MI308X (80-CU gfx942 variant) and adds coding-agent benchmarks.
+> **Status: validated on MI308X (2026-08-18).** Full G-gate campaign (G0-G10)
+> completed on the same 192 GB gfx942 hardware validated for
+> DeepSeek-V4-Flash-0731; real-machine numbers are in
+> [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Headline results: MTP-3
+> acceptance ~65%, C1 decode 94.2 tok/s, C32 aggregate 1094 tok/s, 512K YaRN
+> server live, 30-turn agent prefix-cache hit 84%, tool-call round-trip 5/5.
+> The concurrency model in [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md)
+> was confirmed against measured decode throughput and the measured KV pool.
 
 ## Why Qwen3.8-27B on gfx942
 
@@ -65,24 +65,25 @@ The DeepSeek recipe wins on 524K **extreme concurrency** (MLA's compact KV lets
 (hybrid attention is ~4× cheaper at 500K) and on **simplicity** (no fork, no
 DeepSeek-specific overlays, upstream vLLM supports it directly).
 
-## Estimated concurrency for agentic coding loops
+## Concurrency for agentic coding loops (measured)
 
-Full analysis in [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md). Headline
-estimate for an agent-coding loop with web search (20-30s turn interval, ~900
-decode tokens per turn, 80K median context):
+Model in [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md), anchored to the
+measured MTP-3 decode curve (G5): per-session 64.5 tok/s at C8, 46.5 tok/s at
+C16, 34.2 tok/s at C32; aggregate ceiling 1094 tok/s. For an agent-coding loop
+with web search (~900 decode tokens/turn, 80K median context):
 
-| Workload profile | Estimated concurrency | Binding constraint |
-| --- | ---: | --- |
-| Interactive, websearch-heavy (2-5s decode/turn) | **~20-30** | Decode throughput |
-| Interactive, pure coding, fast tools (2-5s/turn) | ~7-10 | Decode throughput |
-| Batch / background, latency-tolerant (30-60s/turn) | ~40-60 | KV memory + admission |
-| All sessions at 512K extreme | ~8-10 | KV memory |
+| Workload profile | Concurrency | Per-session decode | Binding constraint |
+| --- | ---: | ---: | --- |
+| Interactive, fast tools | ~8-16 | 46-65 tok/s | Decode throughput |
+| Interactive, websearch-heavy | ~16 | 46.5 tok/s | Decode throughput |
+| Batch / background, latency-tolerant | ~32+ | 34.2 tok/s | KV memory + admission |
+| All sessions at 512K extreme | ~6-7 | — | KV memory (6.73× measured) |
 
 The binding constraint for interactive agent loops is **engine decode
-throughput** (~900 tok/s aggregate on this 80-CU MI308X, proxied from the
-DeepSeek-V4-Flash validated baseline). The 512K ceiling is a worst-case memory
-limit, not a typical operating point — real agentic sessions sit at 12K-80K
-context (turn-30 median).
+throughput**; MTP-3 pushes the interactive limit (per-session > ~30 tok/s)
+from ~C16 to ~C32. The measured KV pool is 3.92M FP8 tokens (14.96× at 262K,
+6.73× at 512K). The 512K ceiling is a worst-case memory limit, not a typical
+operating point — real agentic sessions sit at 12K-80K context.
 
 ## Quick start
 
@@ -149,11 +150,18 @@ curl -s http://localhost:8000/health
 python3 scripts/bench/bench_agent_trace.py 30 20000
 ```
 
-## Stable launch profile (planned)
+## Validated production profile
+
+Promoted 2026-08-18 after the G3/G5 gates (`docs/PERFORMANCE.md`). The two
+non-obvious requirements are the attention backend (head_dim=256, see "Known
+ROCm gotchas") and **GPU-only KV** — CPU-KV offload is unstable for Qwen3.8,
+unlike the DeepSeek sibling which runs a 12 GB CPU tier:
 
 ```text
 --max-model-len 524288                    (YaRN factor 2.0 over 262K native)
 --hf-overrides '{"text_config":{"rope_parameters":{...,"factor":2.0,...}}}'
+--attention-backend ROCM_AITER_UNIFIED_ATTN   (required: head_dim=256)
+--block-size 64
 --kv-cache-dtype fp8
 --enable-prefix-caching
 --max-num-seqs 32                         (interactive) / 64 (batch)
@@ -164,10 +172,9 @@ python3 scripts/bench/bench_agent_trace.py 30 20000
 --tool-call-parser qwen3_coder
 --enable-auto-tool-choice
 --enable-prompt-tokens-details
-MTP: method=mtp, num_speculative_tokens=3
+MTP: method=mtp, num_speculative_tokens=3 (acceptance ~65%)
 --gpu-memory-utilization 0.95
---kv-cache-memory-bytes <hardware-dependent>
---kv-offloading-size 12                   (native CPU-KV, 16GB /dev/shm limit)
+KV_OFFLOAD_GB=0                           (GPU-only KV; CPU offload unstable)
 ```
 
 ### A/B without editing the launcher
@@ -178,7 +185,9 @@ MAX_NUM_SEQS=32
 MAX_BATCHED_TOKENS=3072
 MTP_ENABLED=1
 MTP_K=3
-KV_OFFLOAD_GB=12
+ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN
+BLOCK_SIZE=64
+KV_OFFLOAD_GB=0       # GPU-only; CPU offload unstable for Qwen3.8
 GPU_MEMORY_UTILIZATION=0.95
 QUANT=bf16            # or fp8
 ```
@@ -223,7 +232,7 @@ scripts/bench/
 └── bench_ttft_isolation.py        short request injected during long prefill
 ```
 
-## Stable runtime provenance (planned)
+## Stable runtime provenance
 
 ```text
 GPU        MI308X / MI300X class, gfx942, 192 GB
@@ -246,17 +255,40 @@ patch src  none (upstream-native; Qwen3.8 enabled by vllm-project/vllm#50068)
 - **Qwen3.8 enablement for AMD ROCm**: merged via
   [vllm-project/vllm#50068](https://github.com/vllm-project/vllm/pull/50068),
   validated with a two-node TP=8 PP=2 ROCm deployment.
-- **MTP on ROCm**: native multi-token prediction is supported; acceptance and
-  throughput characteristics on gfx942 are not yet independently measured for
-  the 27B dense variant. This is a validation priority.
+- **MTP on ROCm**: validated 2026-08-18 (G5). MTP-3 + UNIFIED_ATTN on gfx942
+  reaches ~65% mean acceptance (per-position 0.84 / 0.64 / 0.47) and lifts C1
+  decode from 56.2 to **94.2 tok/s**; C32 aggregate reaches 1094 tok/s. MTP-1
+  regresses at high concurrency, so MTP-3 is the promoted default.
+
+## Known ROCm gotchas (validated)
+
+Hard-won during the G-gate campaign; each is a real failure mode, not a style
+preference.
+
+1. **head_dim=256 rejects the default attention backend.** The full-attention
+   layers use head_dim=256. The ROCm custom paged kernel only supports
+   head_size 64/128, so the default backend silently falls back to Triton and
+   decode drops ~13-35%. Fix: `--attention-backend ROCM_AITER_UNIFIED_ATTN
+   --block-size 64` + `VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`.
+2. **Thinking mode can return empty output.** With `reasoning_effort=xhigh`
+   (the default), the `qwen3` parser waits for a closing `</think>`; if the
+   model is still thinking when `max_tokens` is hit, the whole response is
+   discarded (0 content, `finish_reason=length`). Fix: `reasoning_effort=low`
+   / `medium`, or `enable_thinking=false`.
+3. **CPU-KV offload crashes.** Unlike the DeepSeek sibling, Qwen3.8 hits a
+   `madvise(MADV_POPULATE_WRITE)` EINVAL on the Kata/tmpfs sandbox when CPU-KV
+   offload is enabled. Fix: `KV_OFFLOAD_GB=0` (GPU-only KV).
+4. **Cold long-context TTFT is JIT, not prefill.** The first request at a new
+   shape pays Triton JIT (128K cold 374s vs warm 5.0s). Extend warmup to cover
+   32K/64K/128K shapes so production requests stay on the warm path.
 
 ## Risks (see docs/RESEARCH_NOTES.md for detail)
 
 1. **80-CU MI308X compute**: this host reports 80 CUs vs MI300X's 304. The
    DeepSeek-V4-Flash validated decode ceiling (~915 tok/s at C64) is the
    hardware proxy; do not use published MI300X benchmarks.
-2. **MTP acceptance on gfx942**: unmeasured for Qwen3.8-27B. MTP-1 is known to
-   regress at high concurrency; MTP-3 is the recommended starting point.
+2. **MTP acceptance on gfx942**: resolved (G5, ~65% acceptance, C1 94.2 tok/s).
+   MTP-1 still regresses at high concurrency; MTP-3 is the promoted default.
 3. **FP8 KV cache calibration**: the official FP8 checkpoint may lack KV-cache
    calibration scales; `--kv-cache-dtype fp8` may emit warnings. The unsloth
    FP8 variant includes calibration.

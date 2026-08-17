@@ -10,7 +10,7 @@
 bash /mnt/workspace/bootstrap.sh
 ```
 
-Confirms sshd + reverse tunnels. Agent takes over via `ssh dsw-amd`.
+Confirms sshd + reverse tunnels. The agent then takes over the session over SSH.
 
 ## 1. Restore runtime (every boot)
 
@@ -54,41 +54,29 @@ bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/stage_model_local.sh
 Copies the 52 GB BF16 checkpoint from NFS to local SSD. The launcher
 auto-prefers the local hot copy. Skippable if NFS read latency is acceptable.
 
-## 5. Serve Qwen3.8-27B
+## 5. Serve Qwen3.8-27B (vLLM — the validated path)
 
-### Path A: SGLang (RECOMMENDED for hybrid attention)
-
-SGLang's Unified Radix Cache with MAMBA component caches GDN recurrent state
-across requests — vLLM's APC cannot do this. This is the primary advantage.
+vLLM is the validated production path (G-gate campaign, 2026-08-18). SGLang was
+evaluated and **abandoned** for Qwen3.8: `sgl_kernel` ships CUDA-only wheels
+(`libnvrtc.so.13`), so SGLang cannot install on ROCm without Docker, and DSW
+has no Docker. `02_serve_sglang.sh` is retained for reference only.
 
 ```bash
 # In shell 1:
 export VLLM_API_KEY_FILE=/mnt/workspace/.bootstrap/vllm_api_key
-MAX_MODEL_LEN=262144 \
-  bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/02_serve_sglang.sh qwen38
-```
-
-### Path B: vLLM (fallback, already validated for DS0731)
-
-```bash
-MAX_MODEL_LEN=262144 MAX_NUM_SEQS=32 MTP_K=3 \
+ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN BLOCK_SIZE=64 \
+MTP_ENABLED=1 MTP_K=3 KV_OFFLOAD_GB=0 MAX_MODEL_LEN=524288 \
   bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/02_serve_vllm.sh qwen38
 ```
 
 Wait for `/health` to return 200 (check with `curl -s http://localhost:8000/health`).
 
-### When to use which
+The two non-obvious knobs (see README "Known ROCm gotchas"):
 
-| | SGLang (Path A) | vLLM (Path B) |
-|---|---|---|
-| GDN state caching | ✅ Unified Radix Cache with MAMBA | ❌ per-request only |
-| MTP + GDN | ✅ ReplaySSM (no crash) | ⚠️ PR #36918 (fixed, verify) |
-| GDN state dtype | ✅ `--mamba-ssm-dtype bf16` | ❌ fixed fp32 |
-| AMD verified | ⚠️ Triton GDN works, 27B dense untested | ✅ dev306 wheel verified |
-| DS0731 baseline | ❌ no comparison | ✅ same hardware, same engine |
-
-**Try SGLang first.** If the Triton GDN kernel compiles and the server starts,
-use SGLang. If it fails, fall back to vLLM.
+- `ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN` + `BLOCK_SIZE=64` — required for
+  head_dim=256; the default backend falls back to Triton and loses 13-35% decode.
+- `KV_OFFLOAD_GB=0` — GPU-only KV; CPU-KV offload hits a `madvise` EINVAL on this
+  sandbox (unlike the DeepSeek sibling, which runs a 12 GB CPU tier).
 
 ## 6. Warm up + snapshot (first boot only)
 
@@ -170,12 +158,14 @@ Record results in `docs/PERFORMANCE.md`, replacing estimates with real numbers.
 ## Quick reference: serve config knobs
 
 ```bash
-MAX_MODEL_LEN=262144          # 262K native; 524288 for YaRN factor 2.0
+MAX_MODEL_LEN=524288          # YaRN factor 2.0 over 262K native
 MAX_NUM_SEQS=32               # conservative (GDN state + 80-CU); 64 for batch
 MAX_BATCHED_TOKENS=3072       # coding-agent latency profile
 MTP_ENABLED=1                 # 1=MTP-3 (latency); 0=native (throughput)
 MTP_K=3                       # MTP depth; 1 regresses at high concurrency
-KV_OFFLOAD_GB=12              # CPU KV tier (16GB /dev/shm limit)
+ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN  # required: head_dim=256
+BLOCK_SIZE=64
+KV_OFFLOAD_GB=0               # GPU-only; CPU offload unstable for Qwen3.8
 QUANT=bf16                     # bf16 (reference) or fp8 (max KV headroom)
 LANGUAGE_MODEL_ONLY=1          # skip vision encoder for text-only serving
 GPU_MEMORY_UTILIZATION=0.95
