@@ -165,6 +165,11 @@ Avg draft acceptance:     61.6-66.5%
 | C4 (512 tok) | 84.2 | 336.8 | 89% |
 | C8 (512 tok) | 64.5 | 516.2 | 68% |
 | C16 (512 tok) | 46.5 | 743.5 | 49% |
+| **C32 (512 tok)** | **34.2** | **1094.3** | 36% |
+
+**C32 aggregate 1094.3 tok/s exceeds the ~900 native engine ceiling** — MTP-3
+trades extra draft-forward compute for higher accepted-token throughput, and
+the 80-CU MI308X has enough headroom to sustain this even at C32.
 
 ### Comparison across all configurations
 
@@ -176,6 +181,7 @@ Avg draft acceptance:     61.6-66.5%
 | C4 aggregate | — | 158.3 | **336.8** |
 | C8 aggregate | — | — | **516.2** |
 | C16 aggregate | — | — | **743.5** |
+| C32 aggregate | — | — | **1094.3** |
 | TTFT | 0.15s | 0.06s | 0.09s |
 | GPU KV pool | 3,892,752 | 3,922,907 | 3,922,907* |
 | Max concurrency @262K | 14.85x | 14.96x | 14.96x* |
@@ -190,9 +196,9 @@ approaching the ~900 tok/s engine ceiling.
 
 | Workload | Concurrency | Per-session decode | Turn time (decode+tool) |
 | --- | ---: | ---: | ---: |
-| Interactive, fast tools | ~8 | 64.5 tok/s | ~19s (14s + 5s) |
-| Interactive, websearch | ~8-16 | 46-65 tok/s | ~24-39s |
-| Batch, latency-tolerant | ~32+ | ~25 tok/s est. | ~36s+ |
+| Interactive, fast tools | ~8-16 | 46-65 tok/s | ~19-24s (14-19s + 5s) |
+| Interactive, websearch | ~16 | 46.5 tok/s | ~34s (19s + 15s) |
+| Batch, latency-tolerant | ~32+ | 34.2 tok/s | ~41s (26s + 15s) |
 
 **Key finding**: MTP-3 roughly doubles per-session throughput at every
 concurrency level vs UNIFIED_ATTN alone. The interactive concurrency limit
@@ -202,15 +208,17 @@ concurrency level vs UNIFIED_ATTN alone. The interactive concurrency limit
 
 Cold prefill (no prefix cache hit) with increasing context length:
 
-| Context | TTFT (cold) | Decode after prefill | Notes |
-| ---: | ---: | ---: | --- |
-| 32K | 52.98s | 28.5 tok/s | Includes JIT compilation for new shapes |
-| 128K | 373.64s | 10.7 tok/s | 6+ min cold start; multiple JIT kernels compiled |
+| Context | TTFT (cold) | TTFT (warm) | Decode | Notes |
+| ---: | ---: | ---: | ---: | --- |
+| 32K | 52.98s | 3.4s | 28.5 tok/s | Cold includes JIT for new shapes |
+| 64K | — | 5.3s | — | Warmup covers this shape |
+| 100K | — | 7.7s | 13.8 tok/s | Warm after JIT |
+| 128K | 373.64s | **5.02s** | 10.7-12.6 tok/s | Cold=JIT dominated; warm=actual prefill |
 
-**JIT compilation is a major contributor**: the warmup didn't cover long-context
-shapes, so Triton kernels (`kernel_unified_attention_2d`, `kernel_unified_attention_3d`,
-`reduce_segments`, `eagle_prepare_inputs_padded_kernel`) are compiled on-the-fly.
-Subsequent requests at the same shape should be faster.
+**JIT compilation is a one-time cost per shape** (74x speedup cold→warm at 128K).
+Extending warmup to cover 32K/64K/128K shapes eliminates the cold-start penalty.
+The actual prefill computation for 128K is only ~5s — close to the original
+~3-5s estimate for 100K (hybrid attention: 16/64 layers O(L²)).
 
 **Decode degradation at long context**: 10.7 tok/s at 128K vs 94.2 at short context.
 The 16 full-attention layers have ~4 GB of KV at 128K (128K × 32 KiB/token), and
@@ -223,9 +231,9 @@ decode at 80K+ context — estimated ~20 tok/s (interpolating 28.5@32K → 10.7@
 which would make turns at 80K+ context noticeably slower.
 
 **Comparison to estimate**: RESEARCH_NOTES estimated ~3-5s for 100K prefill
-(hybrid attention: 16/64 layers O(L²)). Measured is **374s for 128K** — 75-125x
-slower than estimate. The hybrid advantage is real (only 16/64 layers are O(L²)),
-but the constant factor on Triton/ROCm with 80 CUs is much higher than assumed.
+(hybrid attention: 16/64 layers O(L²)). **Warm measured: 5.0s for 128K** — the
+estimate was correct! The 374s cold start was entirely JIT compilation, not
+prefill computation. Extending warmup to cover long-context shapes fixes this.
 
 ## G10: Agent trace + prefix cache (measured 2026-08-18, MTP-3 + UNIFIED_ATTN)
 
@@ -286,11 +294,22 @@ the cold-start penalty entirely.
 | 40K | 1.8s | 88 tok/s | excellent — turn-10 agent loop |
 | 80K | ~3s est. | ~25 tok/s est. | usable — turn-30 median |
 | 100K | 7.7s | 13.8 tok/s | marginal — long-tail only |
-| 128K | ~10s est. | 10.7 tok/s | marginal |
+| 128K | 5.0s | 12.6 tok/s | marginal — prefill OK, decode slow |
 | 200K+ | — | — | hits 262K max_model_len |
 
 **Recommendation**: target 80K or less as the working context for interactive
 agent loops. Beyond 100K, decode drops below 15 tok/s and turns become slow.
+
+### Tool call roundtrip (qwen3_coder parser)
+
+```text
+bench_tool_roundtrip.py --rounds 5 --mode auto --prefix-tokens 20000
+Result: 5/5 PASS — tool calls parsed correctly (read_file with JSON args)
+```
+
+The `qwen3_coder` tool parser works end-to-end with MTP-3 + UNIFIED_ATTN.
+Tool calls are properly extracted from the streamed response, including JSON
+arguments. No raw chat-template leakage.
 
 ## Validation gates
 
@@ -300,10 +319,10 @@ agent loops. Beyond 100K, decode drops below 15 tok/s and turns become slow.
 [ ] G2  SGLang correctness            BLOCKED — see RESEARCH_NOTES §10
 [x] G3  attention backend A/B          UNIFIED_ATTN wins (+13.5% C1, +34.6% long)
 [ ] G4  SSM dtype A/B                 (SGLang-only; blocked)
-[x] G5  MTP-3 speculative decode       94.2 tok/s C1, 743.5 C16 aggregate
+[x] G5  MTP-3 speculative decode       94.2 tok/s C1, C32 agg=1094 (exceeds native ceiling)
 [ ] G6  BF16 KV vs FP8 KV
-[x] G7  concurrency knee C1..C16      knee at ~C8 (64.5 tok/s), C16 still useful
-[x] G8  context scaling 32K/128K      cold TTFT 53s/374s; warm 100K=7.7s
-[x] G10 agent trace 30-turn           cache hit 84%, warm TTFT <2.5s, decode 82.5
+[x] G7  concurrency knee C1..C32      C32=34.2 tok/s, agg=1094; knee ~C8 interactive
+[x] G8  context scaling 32K/128K      warm 128K=5.0s (cold 374s was JIT, not prefill)
+[x] G10 agent trace 30-turn           cache hit 84%, warm TTFT <2.5s, decode 82.5, tool 5/5
 [ ] G9  384K/512K extension + recall  requires YaRN restart; 100K+ decode marginal
 ```
