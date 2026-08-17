@@ -223,6 +223,11 @@ echo "[runtime] gpu_memory_utilization=$GPU_MEMORY_UTILIZATION host=$HOST port=$
 ATTN_ARGS=()
 if [ -n "$ATTENTION_BACKEND" ]; then
   ATTN_ARGS+=(--attention-backend "$ATTENTION_BACKEND")
+  # ROCM_AITER_UNIFIED_ATTN requires the sub-toggle (defaults to False in vLLM).
+  if [ "$ATTENTION_BACKEND" = "ROCM_AITER_UNIFIED_ATTN" ]; then
+    export VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION="${VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:-1}"
+    echo "[attention] UNIFIED_ATTN: set VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 (required for head_dim=256)"
+  fi
 fi
 
 exec vllm serve "$MODEL_PATH" \

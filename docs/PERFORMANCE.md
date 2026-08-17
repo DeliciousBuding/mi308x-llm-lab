@@ -103,17 +103,52 @@ before relying on hidden-reasoning behavior.
 54.3 tok/s with thinking off — longer generations pay the KV-growth cost on the
 16 full-attention layers.
 
+## G3: Attention backend A/B (measured 2026-08-18)
+
+**Root cause of low baseline decode**: Qwen3.8-27B's full-attention layers use
+head_dim=256. The ROCm custom paged attention kernel
+(`use_rocm_custom_paged_attention()`) only supports head_size 64/128 on CDNA,
+so the default `ROCM_ATTN` backend is rejected and vLLM falls through to
+`TRITON_ATTN`. The AITER Flash Attention MHA kernel (`ROCM_AITER_FA`) is also
+not in the priority list because `is_mha_enabled()` returns False at runtime.
+
+**Fix**: `--attention-backend ROCM_AITER_UNIFIED_ATTN --block-size 64` +
+`VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`. The `RocmAiterUnifiedAttentionBackend`
+supports `head_size >= 32` and uses a different paged decode implementation
+that does not hit the head_dim=256 restriction.
+
+| Metric | Baseline (Triton, bs=256) | UNIFIED_ATTN (bs=64) | Delta |
+| --- | ---: | ---: | ---: |
+| C1 decode-512 | 49.5 tok/s | **56.2 tok/s** | +13.5% |
+| C1 decode-4096 | 41.6 tok/s | **56.1 tok/s** | **+34.6%** |
+| C2 aggregate (512) | — | 101.5 tok/s | — |
+| C4 aggregate (512) | — | 158.3 tok/s | — |
+| TTFT | 0.15s | **0.06s** | -60% |
+| GPU KV pool | 3,892,752 tok | 3,922,907 tok | +0.8% |
+| Max concurrency @262K | 14.85x | 14.96x | +0.7% |
+| "Cannot use ROCm custom" warning | yes | **no** | — |
+
+**Key insight**: UNIFIED_ATTN not only improves raw decode speed but also
+**eliminates the throughput degradation at long generation lengths** (56.2 →
+56.1 from 512→4096 tokens, vs 49.5 → 41.6 for baseline). This is critical for
+agentic coding loops where turns can be 900+ tokens.
+
+**Remaining warnings** (non-critical):
+- `aiter sampler does not support per-request generators; falling back to PyTorch-native`
+- `Triton kernel JIT compilation during inference: kernel_unified_attention_2d` (warmup issue)
+- `PyTorch's native GELU with tanh approximation is unstable` (minor)
+
 ## Validation gates
 
 ```text
 [x] G0  system check
 [x] G1  vLLM 262K native, MTP off, C1 correctness + decode baseline
 [ ] G2  SGLang correctness            BLOCKED — see RESEARCH_NOTES §10
-[ ] G3  attention backend A/B
+[x] G3  attention backend A/B          UNIFIED_ATTN wins (+13.5% C1, +34.6% long)
 [ ] G4  SSM dtype A/B                 (SGLang-only; blocked)
 [ ] G5  native / MTP-1 / MTP-2 / MTP-3
 [ ] G6  BF16 KV vs FP8 KV
-[ ] G7  concurrency knee C1..C32
+[ ] G7  concurrency knee C1..C32      partial: C2/C4 measured (G3 run)
 [ ] G8  context scaling 32K/128K/256K
 [ ] G9  384K/512K extension + recall
 [ ] G10 real agent replay
