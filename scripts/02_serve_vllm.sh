@@ -51,6 +51,17 @@ fi
 # may need its own tuning tables, but default tables are the starting point.
 export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-1}"
 
+# Attention backend / block size for the full-attention (GQA, head_dim=256)
+# layers. G1 finding (2026-08-17): the ROCm custom paged kernel only supports
+# head_size 64/128 and block_size 16/32, so with head_dim=256 it falls back to
+# Triton and decode is GEMM-bound (~54 tok/s). The AITER FA backend supports
+# head_size 256 (needs block 16/32); ROCM_AITER_UNIFIED_ATTN needs block%16==0
+# (prefers 64). Sweep in G3:
+#   ATTENTION_BACKEND=ROCM_AITER_FA       BLOCK_SIZE=16
+#   ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN BLOCK_SIZE=64
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-}"
+BLOCK_SIZE="${BLOCK_SIZE:-256}"
+
 # ---------------------------------------------------------------------------
 # Model path resolution (prefer ephemeral local hot copy when complete)
 # ---------------------------------------------------------------------------
@@ -207,7 +218,12 @@ fi
 # ---------------------------------------------------------------------------
 echo "[model] $MODEL_PATH -> $SERVED_MODEL_NAME (quant=$QUANT, shards=$SHARD_COUNT)"
 echo "[scheduler] max_model_len=$MAX_MODEL_LEN max_num_seqs=$MAX_NUM_SEQS max_batched_tokens=$MAX_BATCHED_TOKENS long_prefill_cap=$LONG_PREFILL_TOKEN_THRESHOLD"
-echo "[runtime] gpu_memory_utilization=$GPU_MEMORY_UTILIZATION host=$HOST port=$PORT"
+echo "[runtime] gpu_memory_utilization=$GPU_MEMORY_UTILIZATION host=$HOST port=$PORT block_size=$BLOCK_SIZE attention_backend=${ATTENTION_BACKEND:-auto}"
+
+ATTN_ARGS=()
+if [ -n "$ATTENTION_BACKEND" ]; then
+  ATTN_ARGS+=(--attention-backend "$ATTENTION_BACKEND")
+fi
 
 exec vllm serve "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -215,7 +231,7 @@ exec vllm serve "$MODEL_PATH" \
   --generation-config vllm \
   --tensor-parallel-size 1 \
   --kv-cache-dtype fp8 \
-  --block-size 256 \
+  --block-size "$BLOCK_SIZE" \
   --enable-prefix-caching \
   --max-model-len "$MAX_MODEL_LEN" \
   --max-num-seqs "$MAX_NUM_SEQS" \
@@ -228,6 +244,7 @@ exec vllm serve "$MODEL_PATH" \
   --enable-prompt-tokens-details \
   "${SPEC_ARGS[@]}" \
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+  "${ATTN_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" \
   "${AUTH_ARGS[@]}" \
   --host "$HOST" \
