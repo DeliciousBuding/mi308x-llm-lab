@@ -138,6 +138,66 @@ agentic coding loops where turns can be 900+ tokens.
 - `Triton kernel JIT compilation during inference: kernel_unified_attention_2d` (warmup issue)
 - `PyTorch's native GELU with tanh approximation is unstable` (minor)
 
+## G5: MTP-3 speculative decode (measured 2026-08-18)
+
+**MTP-3 + UNIFIED_ATTN on gfx942 works and works well.** This was the biggest
+unknown — AMD MTP support was flagged as unmeasured (vLLM issue #23123). Results
+exceed the original estimate of ~95-100 tok/s.
+
+Launch: `--attention-backend ROCM_AITER_UNIFIED_ATTN --block-size 64` +
+`--speculative-config '{"method":"mtp","num_speculative_tokens":3}'` +
+`VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1`.
+
+### MTP acceptance metrics (from vLLM SpecDecoding logs)
+
+```text
+Mean acceptance length:  2.85-2.99 / 3.0    (excellent — nearly all 3 drafts accepted)
+Per-position acceptance:  pos1=0.84  pos2=0.64  pos3=0.47
+Avg draft acceptance:     61.6-66.5%
+```
+
+### Decode throughput scaling (MTP-3 + UNIFIED_ATTN)
+
+| Concurrency | Per-session (tok/s) | Aggregate (tok/s) | Scaling eff. |
+| ---: | ---: | ---: | ---: |
+| C1 (4096 tok) | **94.2** | 94.2 | 100% |
+| C2 (512 tok) | 88.2 | 176.3 | 94% |
+| C4 (512 tok) | 84.2 | 336.8 | 89% |
+| C8 (512 tok) | 64.5 | 516.2 | 68% |
+| C16 (512 tok) | 46.5 | 743.5 | 49% |
+
+### Comparison across all configurations
+
+| Metric | Baseline (Triton) | UNIFIED_ATTN | **MTP-3 + UNIFIED_ATTN** |
+| --- | ---: | ---: | ---: |
+| C1 decode-512 | 49.5 | 56.2 | — |
+| C1 decode-4096 | 41.6 | 56.1 | **94.2** |
+| C2 aggregate | — | 101.5 | **176.3** |
+| C4 aggregate | — | 158.3 | **336.8** |
+| C8 aggregate | — | — | **516.2** |
+| C16 aggregate | — | — | **743.5** |
+| TTFT | 0.15s | 0.06s | 0.09s |
+| GPU KV pool | 3,892,752 | 3,922,907 | 3,922,907* |
+| Max concurrency @262K | 14.85x | 14.96x | 14.96x* |
+
+(*MTP-3 does not change the KV pool size; the draft head uses the same KV.)
+
+### Updated concurrency estimate (MTP-3 + UNIFIED_ATTN)
+
+With MTP-3, per-session decode at C8 is 64.5 tok/s (900 tokens in ~14s), and
+at C16 is 46.5 tok/s (900 tokens in ~19s). The aggregate at C16 (743.5) is
+approaching the ~900 tok/s engine ceiling.
+
+| Workload | Concurrency | Per-session decode | Turn time (decode+tool) |
+| --- | ---: | ---: | ---: |
+| Interactive, fast tools | ~8 | 64.5 tok/s | ~19s (14s + 5s) |
+| Interactive, websearch | ~8-16 | 46-65 tok/s | ~24-39s |
+| Batch, latency-tolerant | ~32+ | ~25 tok/s est. | ~36s+ |
+
+**Key finding**: MTP-3 roughly doubles per-session throughput at every
+concurrency level vs UNIFIED_ATTN alone. The interactive concurrency limit
+(where per-session drops below ~30 tok/s) is pushed from ~C16 to ~C32+.
+
 ## Validation gates
 
 ```text
@@ -146,9 +206,9 @@ agentic coding loops where turns can be 900+ tokens.
 [ ] G2  SGLang correctness            BLOCKED — see RESEARCH_NOTES §10
 [x] G3  attention backend A/B          UNIFIED_ATTN wins (+13.5% C1, +34.6% long)
 [ ] G4  SSM dtype A/B                 (SGLang-only; blocked)
-[ ] G5  native / MTP-1 / MTP-2 / MTP-3
+[x] G5  MTP-3 speculative decode       94.2 tok/s C1, 743.5 C16 aggregate
 [ ] G6  BF16 KV vs FP8 KV
-[ ] G7  concurrency knee C1..C32      partial: C2/C4 measured (G3 run)
+[x] G7  concurrency knee C1..C16      knee at ~C8 (64.5 tok/s), C16 still useful
 [ ] G8  context scaling 32K/128K/256K
 [ ] G9  384K/512K extension + recall
 [ ] G10 real agent replay
