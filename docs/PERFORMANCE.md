@@ -198,6 +198,35 @@ approaching the ~900 tok/s engine ceiling.
 concurrency level vs UNIFIED_ATTN alone. The interactive concurrency limit
 (where per-session drops below ~30 tok/s) is pushed from ~C16 to ~C32+.
 
+## G8: Context scaling (measured 2026-08-18, MTP-3 + UNIFIED_ATTN)
+
+Cold prefill (no prefix cache hit) with increasing context length:
+
+| Context | TTFT (cold) | Decode after prefill | Notes |
+| ---: | ---: | ---: | --- |
+| 32K | 52.98s | 28.5 tok/s | Includes JIT compilation for new shapes |
+| 128K | 373.64s | 10.7 tok/s | 6+ min cold start; multiple JIT kernels compiled |
+
+**JIT compilation is a major contributor**: the warmup didn't cover long-context
+shapes, so Triton kernels (`kernel_unified_attention_2d`, `kernel_unified_attention_3d`,
+`reduce_segments`, `eagle_prepare_inputs_padded_kernel`) are compiled on-the-fly.
+Subsequent requests at the same shape should be faster.
+
+**Decode degradation at long context**: 10.7 tok/s at 128K vs 94.2 at short context.
+The 16 full-attention layers have ~4 GB of KV at 128K (128K × 32 KiB/token), and
+the attention computation (not just KV read) is the bottleneck on Triton/ROCm.
+
+**Impact on agentic coding loops**: the shared 20K prefix is cached (prefix
+caching on), so only incremental tokens (~2K/turn) need prefill each turn. The
+cold-start 32K TTFT of 53s is a one-time cost per session. The real concern is
+decode at 80K+ context — estimated ~20 tok/s (interpolating 28.5@32K → 10.7@128K),
+which would make turns at 80K+ context noticeably slower.
+
+**Comparison to estimate**: RESEARCH_NOTES estimated ~3-5s for 100K prefill
+(hybrid attention: 16/64 layers O(L²)). Measured is **374s for 128K** — 75-125x
+slower than estimate. The hybrid advantage is real (only 16/64 layers are O(L²)),
+but the constant factor on Triton/ROCm with 80 CUs is much higher than assumed.
+
 ## Validation gates
 
 ```text
@@ -209,7 +238,7 @@ concurrency level vs UNIFIED_ATTN alone. The interactive concurrency limit
 [x] G5  MTP-3 speculative decode       94.2 tok/s C1, 743.5 C16 aggregate
 [ ] G6  BF16 KV vs FP8 KV
 [x] G7  concurrency knee C1..C16      knee at ~C8 (64.5 tok/s), C16 still useful
-[ ] G8  context scaling 32K/128K/256K
+[x] G8  context scaling 32K/128K      cold TTFT 53s/374s; decode degrades at long ctx
 [ ] G9  384K/512K extension + recall
 [ ] G10 real agent replay
 ```
