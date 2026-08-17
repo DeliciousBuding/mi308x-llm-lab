@@ -244,7 +244,7 @@ and is a validation priority.**
 **MXFP4 does not load on NVIDIA devices** (vLLM missing linear-method support).
 On AMD/gfx942, the FP8 checkpoint is the right quantization path.
 
-## 9. Risks (ordered by severity)
+## 9. Risks (ordered by severity, updated 2026-08-17)
 
 1. **80-CU compute is real**: this host reports 80 CUs, not MI300X's 304. The
    DeepSeek-V4-Flash 914 tok/s is the validated ceiling proxy. Published
@@ -252,17 +252,27 @@ On AMD/gfx942, the FP8 checkpoint is the right quantization path.
 2. **MTP acceptance on gfx942**: unmeasured for Qwen3.8-27B dense. MTP-3 is
    the starting point; if acceptance is low, single-stream decode drops to
    ~95-100 tok/s (bandwidth-bound), pushing interactive concurrency down.
-3. **FP8 KV cache calibration**: the official FP8 checkpoint may lack KV-cache
+3. **GDN state allocation** (vllm-metal#400): Qwen3.5 hybrid models allocate
+   GDN recurrent state for `max_num_seqs` at startup. With 48 GDN layers,
+   this can be ~5 GB at `max_num_seqs=64` on top of the KV budget. **Start
+   with `max_num_seqs=32`** to avoid startup OOM; raise only after measuring
+   actual GDN state size.
+4. **Mixed batch spec-decode crash** (vllm#36918): GDN attention backend
+   crashes when a batch contains both regular decode and speculative-decode
+   requests (happens when concurrent requests approach `max_model_len` at
+   different times). Fix merged upstream; verify dev306 includes it. If the
+   crash recurs, disable MTP as a workaround.
+5. **FP8 KV cache calibration**: the official FP8 checkpoint may lack KV-cache
    calibration scales (`--kv-cache-dtype fp8` may warn). Workaround: use the
    unsloth FP8 variant, or accept BF16 KV (64 KiB/token, halves KV capacity).
-4. **YaRN factor 2.0 quality**: 262K → 512K degrades short-context quality.
+6. **YaRN factor 2.0 quality**: 262K → 512K degrades short-context quality.
    Agent-loop early turns (12K context) should be regression-tested against
    the native 262K baseline.
-5. **AITER tuning coverage**: the 80-CU MI308X AITER tables in the sibling
+7. **AITER tuning coverage**: the 80-CU MI308X AITER tables in the sibling
    DeepSeek repo are keyed for DeepSeek GEMM shapes. Qwen3.8's dense GEMMs are
    more standard and may work with default AITER tables, but a tuning pass is
    a post-deployment optimization.
-6. **`/dev/shm` 16 GB** limits CPU KV offload to 12 GB (same host constraint as
+8. **`/dev/shm` 16 GB** limits CPU KV offload to 12 GB (same host constraint as
    DeepSeek-V4-Flash).
 
 ## 10. Recommended validation sequence
