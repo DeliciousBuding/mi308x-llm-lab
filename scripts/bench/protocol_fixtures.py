@@ -87,7 +87,9 @@ def fixture_basic_chat(base_url: str) -> bool:
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
     )
     resp = json.load(urllib.request.urlopen(req, timeout=60))
-    content = resp["choices"][0]["message"]["content"]
+    message = resp["choices"][0]["message"]
+    # In thinking mode the answer may land in reasoning_content while content is None.
+    content = message.get("content") or message.get("reasoning_content") or ""
     return "OK" in content or "ok" in content.lower()
 
 

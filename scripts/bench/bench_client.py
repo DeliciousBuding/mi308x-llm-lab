@@ -126,6 +126,7 @@ def stream_completion(
     )
     start_time = time.time()
     first_token_time = None
+    last_token_time = None
     content_chunks: list[str] = []
     usage_data = {}
 
@@ -141,12 +142,15 @@ def stream_completion(
             chunk = json.loads(data_str)
         except json.JSONDecodeError:
             continue
-        if first_token_time is None and chunk.get("choices"):
-            delta = chunk["choices"][0].get("delta", {})
-            if delta.get("content") or delta.get("reasoning_content"):
-                first_token_time = time.time()
         if chunk.get("choices"):
             delta = chunk["choices"][0].get("delta", {})
+            # Count both content and reasoning_content: in thinking mode the
+            # first emitted tokens are reasoning, and treating them as "not yet
+            # started" would fold decode time into TTFT.
+            if delta.get("content") or delta.get("reasoning_content"):
+                if first_token_time is None:
+                    first_token_time = time.time()
+                last_token_time = time.time()
             if delta.get("content"):
                 content_chunks.append(delta["content"])
         if chunk.get("usage"):
@@ -156,7 +160,10 @@ def stream_completion(
     ttft = (first_token_time - start_time) if first_token_time else (end_time - start_time)
     total_elapsed = end_time - start_time
     completion_tokens = usage_data.get("completion_tokens", 0)
-    decode_rate = completion_tokens / (end_time - first_token_time) if first_token_time and (end_time > first_token_time) else 0.0
+    # Measure decode over the token-emission window, not to end-of-stream: the
+    # final usage-only chunk arrives after the last token and would deflate the rate.
+    decode_window = (last_token_time - first_token_time) if (first_token_time and last_token_time) else 0.0
+    decode_rate = completion_tokens / decode_window if decode_window > 0 else 0.0
 
     return {
         "ttft_s": ttft,
