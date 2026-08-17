@@ -166,7 +166,9 @@ fi
 # ---------------------------------------------------------------------------
 # MTP speculative decoding (native multi-token prediction, NOT DSpark)
 # ---------------------------------------------------------------------------
-MTP_ENABLED="${MTP_ENABLED:-1}"
+# MTP default OFF for correctness reference (Gate G1).
+# Sweep native / MTP-1 / MTP-2 / MTP-3 on GPU before locking.
+MTP_ENABLED="${MTP_ENABLED:-0}"
 MTP_K="${MTP_K:-3}"
 SPEC_ARGS=()
 if [ "$MTP_ENABLED" = "1" ]; then

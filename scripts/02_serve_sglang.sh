@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Serve Qwen3.8-27B with SGLang on ROCm (gfx942 / MI308X / MI300X).
 #
-# SGLang is the RECOMMENDED serving engine for Qwen3.8-27B's hybrid attention
-# architecture. Its Unified Radix Cache with MAMBA component caches GDN
-# recurrent state across requests — vLLM's APC cannot do this.
+# SGLang is an EXPERIMENTAL CANDIDATE for Qwen3.8-27B on AMD.
+# vLLM (02_serve_vllm.sh) is the production baseline.
+# Real agent-loop A/B on GPU decides the winner.
 #
-# Key SGLang advantages for this model:
-#   - mamba_radix_cache.py: caches GDN state in radix tree (not just KV)
-#   - hi_mamba_radix_cache.py: CPU offload for GDN state (HiCache)
-#   - triton_gdn_fused_proj.py: Triton GDN kernel (works on ROCm)
-#   - cutedsl_gdn_mtp_ring.py: ReplaySSM for MTP (no mixed-batch crash)
-#   - Anthropic-compatible endpoint (Claude Code connects natively)
+# Key correction (2026-08-17): SGLang on AMD MI GPUs must use `no_buffer`
+# Mamba Radix Cache strategy — the `extra_buffer` branching-point GDN state
+# caching is NVIDIA-only. This weakens SGLang's cross-request GDN state
+# caching advantage on AMD. See RESEARCH_NOTES.md §9 for details.
+#
+# SGLang still offers: Triton GDN kernels, ReplaySSM for MTP, --mamba-ssm-dtype,
+# Anthropic-compatible endpoint. These are worth testing but not assumed superior.
 #
 # This script is secret-neutral and does not generate/persist API keys.
 set -euo pipefail
@@ -89,34 +90,50 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Scheduler / memory profile (SGLang-specific, tuned for hybrid GDN)
+# Scheduler / memory profile (SGLang-specific, tuned for hybrid GDN on AMD)
 # ---------------------------------------------------------------------------
-# --mamba-full-memory-ratio: the KEY sizing flag for hybrid GDN models.
-# Splits post-weight memory between GDN state pool and attention KV pool.
-# Formula: ratio = (S + D) × state_bytes / (L × kv_bytes_per_token)
-#   S = 4 (extra_buffer_lazy), D = 4 (EAGLE MTP-3+1)
-#   state_bytes = 78.4 MB (bf16), kv_bytes_per_token = 32.8 KB (fp8)
-#   L = 80000 (avg agentic context)
-# → ratio ≈ 0.24 for 80K context; adjust for your workload
-MAMBA_FULL_MEMORY_RATIO="${MAMBA_FULL_MEMORY_RATIO:-0.24}"
-MAMBA_SSM_DTYPE="${MAMBA_SSM_DTYPE:-bfloat16}"
-MAMBA_RADIX_CACHE_STRATEGY="${MAMBA_RADIX_CACHE_STRATEGY:-extra_buffer_lazy}"
+# CRITICAL (2026-08-17 correction): SGLang on AMD MI GPUs must use
+# `no_buffer` Mamba Radix Cache strategy. The `extra_buffer` branching-point
+# Mamba state caching depends on FLA path (NVIDIA-only). `no_buffer` lowers
+# memory but does NOT support overlap scheduler or branching-point GDN state
+# cache. See: sgl-project/sglang docs_new/cookbook/autoregressive/Qwen/Qwen3.5.mdx
+#
+# This weakens SGLang's primary advantage on AMD (cross-request GDN state
+# caching). SGLang is now an EXPERIMENTAL CANDIDATE, not the recommended engine.
+# vLLM is the production baseline. Real agent-loop A/B decides the winner.
+#
+# --mamba-full-memory-ratio: SGLang default is 0.9. Do NOT hardcode a lower
+# value here — let the user sweep it. 0.9 = balanced; lower = more KV, less
+# GDN state pool. The ratio depends on avg context length and concurrency.
+#
+# --mamba-ssm-dtype: default follows model config (float32). BF16 halves the
+# GDN state pool but MAY have cumulative numerical drift at 200K+ context.
+# Test FP32 (correctness reference) vs BF16 (production candidate) on
+# 128K/256K/384K/512K recall + agent replay.
+MAMBA_FULL_MEMORY_RATIO="${MAMBA_FULL_MEMORY_RATIO:-0.9}"
+MAMBA_SSM_DTYPE="${MAMBA_SSM_DTYPE:-float32}"
+MAMBA_RADIX_CACHE_STRATEGY="${MAMBA_RADIX_CACHE_STRATEGY:-no_buffer}"
 CHUNKED_PREFILL_SIZE="${CHUNKED_PREFILL_SIZE:-2048}"
 MEM_FRACTION_STATIC="${MEM_FRACTION_STATIC:-0.90}"
 
-# MTP speculative decoding (native multi-token prediction via EAGLE algorithm)
-MTP_ENABLED="${MTP_ENABLED:-1}"
+# MTP speculative decoding — do NOT lock MTP-3 as default.
+# Reports indicate MTP may not help on AMD MI GPUs (issue #23123).
+# Sweep: native / MTP-1 / MTP-2 / MTP-3 on GPU.
+# Default: OFF (native decode) for correctness reference (Gate G1/G2).
+MTP_ENABLED="${MTP_ENABLED:-0}"
+MTP_STEPS="${MTP_STEPS:-3}"
 SPEC_ARGS=()
 if [ "$MTP_ENABLED" = "1" ]; then
   SPEC_ARGS+=(
     --speculative-algorithm EAGLE
-    --speculative-num-steps 3
+    --speculative-num-steps "$MTP_STEPS"
     --speculative-eagle-topk 1
-    --speculative-num-draft-tokens 4
+    --speculative-num-draft-tokens "$((MTP_STEPS + 1))"
   )
-  echo "[mtp] enabled EAGLE (num_steps=3, topk=1, draft_tokens=4)"
+  echo "[mtp] enabled EAGLE (steps=$MTP_STEPS, topk=1, draft_tokens=$((MTP_STEPS + 1)))"
+  echo "[mtp] WARNING: MTP may not help on AMD MI GPUs (issue #23123); sweep before production"
 else
-  echo "[mtp] disabled (native decode baseline)"
+  echo "[mtp] disabled (native decode — correctness reference baseline)"
 fi
 
 # ---------------------------------------------------------------------------

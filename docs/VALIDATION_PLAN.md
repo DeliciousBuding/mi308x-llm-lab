@@ -1,147 +1,131 @@
 # Validation Plan — Qwen3.8-27B on MI308X
 
-> Pre-deployment checklist. Each gate must pass before proceeding to the next.
-> Gates 1-3 are CPU-cheap or quick; gates 4-9 need GPU time.
+> Gate sequence designed to isolate variables: each gate changes ONE thing.
+> Do NOT skip ahead — every gate validates the previous gate's assumptions.
+> Core principle: **correctness → engine A/B → state dtype → attention backend
+> → MTP → KV dtype → scheduler → concurrency → 512K → real Agent loop**
 
-## Gate 1: Architecture import check (CPU, no GPU needed)
-
-Verify that the dev306 venv can import the Qwen3.8 architecture and that the
-Gated DeltaNet linear-attention kernel path is available.
+## Gate G0: System check (no model)
 
 ```bash
-# In the qwen venv:
-python3 -c "
-from vllm.model_executor.models.registry import ModelRegistry
-names = ModelRegistry.get_supported_archs()
-assert 'Qwen3_5ForCausalLM' in names, 'Qwen3.8 text-only architecture not registered'
-print('OK: Qwen3_5ForCausalLM registered')
-"
-
-python3 -c "
-# Verify the Gated DeltaNet FLA kernel imports (Triton, works on ROCm)
-from vllm.attention.backends.utils import is_torch_available
-print('Triton on ROCm:', is_torch_available())
-"
+ssh dsw-amd 'python3 -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_memory//1e9, \"GB\")"'
+rocm-smi --showproductname
+# Check: NUMA balancing, transparent hugepage, GPU power limit
+cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo "n/a"
 ```
 
-**Pass**: both print OK. **Fail**: the vLLM dev306 build predates PR #50068;
-rebuild from a newer source or patch the model registry.
+**Pass**: `+gitd0c8b1f` torch, gfx942, 192GB VRAM, 80 CU.
 
-## Gate 2: Model download + shard verification
+## Gate G1: vLLM correctness reference
 
 ```bash
-bash scripts/01_download_model.sh qwen38-bf16
-# Verify 18/18 shards + config.json + tokenizer_config.json + index.json
+# vLLM · 262K native · BF16 weights · BF16 KV · MTP OFF · C1
+MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
+  bash scripts/02_serve_vllm.sh qwen38
+# Verify: /health 200, /v1/models, short chat, reasoning_content present
 ```
 
-## Gate 3: 262K native serve + health
+**Pass**: coherent output with reasoning_content, tool calls parse correctly.
 
-Serve at the model's native 262K context (no YaRN). Confirm the basic
-OpenAI-compatible interface works.
+## Gate G2: SGLang correctness reference
 
 ```bash
-bash scripts/02_serve_vllm.sh qwen38
-# In a second shell:
-curl -s http://localhost:8000/health
-curl -s http://localhost:8000/v1/models
-# Short chat completion
-python3 - <<'PY'
-from openai import OpenAI
-c = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
-r = c.chat.completions.create(
-    model="qwen3.8-27b",
-    messages=[{"role":"user","content":"Give me three primes above 100."}],
-    max_tokens=256,
-)
-print(r.choices[0].message.content)
-print("usage:", r.usage)
-PY
+# SGLang · 262K native · float32 SSM · no_buffer · MTP OFF · C1
+MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
+  bash scripts/02_serve_sglang.sh qwen38
+# Verify same as G1
 ```
 
-**Pass**: health 200, models listed, chat returns coherent output with usage.
-**Fail**: kernel import error, OOM, or garbled output — check ROCm/HIP version
-and the Gated DeltaNet Triton kernel path.
+**Pass**: same correctness as G1. If SGLang fails to start → fallback to vLLM.
 
-## Gate 4: Tool-call round trip
+## Gate G3: Attention backend sweep (SGLang only)
 
 ```bash
-python3 scripts/bench/bench_tool_roundtrip.py --rounds 5 --mode auto --prefix-tokens 20000
+# Triton (default) vs AITER
+ATTENTION_BACKEND=aiter MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
+  bash scripts/02_serve_sglang.sh qwen38
 ```
 
-**Pass**: 5/5 tool calls parsed and executed, no raw chat-template leakage.
-This validates the `qwen3_coder` tool parser and the streaming tool protocol.
+**Measure**: decode-512 tok/s, TTFT p95. Pick winner for subsequent gates.
 
-## Gate 5: MTP-3 acceptance measurement
+## Gate G4: SSM dtype A/B (SGLang only)
 
 ```bash
-# MTP-3 enabled (default)
-python3 scripts/bench/bench_full.py decode
-# Note the tok/s and MTP acceptance rate from logs.
-
-# Native baseline (MTP disabled)
-MTP_ENABLED=0 bash scripts/02_serve_vllm.sh qwen38
-python3 scripts/bench/bench_full.py decode
+# FP32 (correctness reference) vs BF16 (production candidate)
+MAMBA_SSM_DTYPE=bfloat16 MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
+  bash scripts/02_serve_sglang.sh qwen38
+# Run multi-needle recall at 128K/256K/384K
 ```
 
-**Pass**: MTP-3 single-stream decode > 1.5× native. If MTP-3 < 1.2× native,
-acceptance is too low on gfx942 — investigate and consider MTP disabled for
-high-batch serving.
+**Measure**: decode tok/s, GDN state pool size (from logs), recall accuracy.
+BF16 has cumulative drift risk at 200K+. Keep FP32 if recall drops.
 
-## Gate 6: YaRN 512K extension + context ladder
+## Gate G5: Speculative decoding sweep
 
 ```bash
-MAX_MODEL_LEN=524288 bash scripts/02_serve_vllm.sh qwen38
-python3 scripts/bench/bench_full.py context
+# native / MTP-1 / MTP-2 / MTP-3 (both engines)
+MTP_ENABLED=1 MTP_K=1 bash scripts/02_serve_vllm.sh qwen38
+MTP_ENABLED=1 MTP_K=2 bash scripts/02_serve_vllm.sh qwen38
+MTP_ENABLED=1 MTP_K=3 bash scripts/02_serve_vllm.sh qwen38
+# Repeat for SGLang with MTP_STEPS=1/2/3
 ```
 
-**Pass**: 50K / 128K / 256K / 384K / 500K all complete without OOM or crash.
-This is survival, not correctness.
+**Measure**: decode-512 tok/s, MTP acceptance rate (from /metrics).
+MTP-1 may regress at high concurrency. Find the knee.
 
-## Gate 7: Multi-needle exact recall
+## Gate G6: KV dtype A/B
 
 ```bash
-python3 scripts/bench/bench_long_context_recall.py --lengths 100000 256000 384000 475000
+# BF16 KV (correctness) vs FP8 KV (capacity)
+KV_CACHE_DTYPE=fp8 bash scripts/02_serve_vllm.sh qwen38   # vLLM
+# SGLang: --kv-cache-dtype fp8 (already default in serve script)
 ```
 
-**Pass**: all needles found at all lengths. If 384K fails (as DSpark did for
-DeepSeek-V4-Flash), record it as a known correctness risk, not a blocker.
+**Measure**: KV pool size, max concurrent sessions, recall at 256K.
+FP8 KV ≈ 2× capacity. Likely production profile.
 
-## Gate 8: Decode throughput ladder
+## Gate G7: Concurrency knee
 
 ```bash
-python3 scripts/bench/bench_high_concurrency.py --concurrencies 1 2 4 8 32 64
+python3 scripts/bench/bench_high_concurrency.py --concurrencies 1 2 5 10 16 24 32
+# Also: agent occupancy benchmark (N agents, mixed decode/prefill/idle)
 ```
 
-**Pass**: aggregate scales sublinearly; C64 aggregate within ±15% of the
-~900 tok/s estimate. Record the actual numbers in `PERFORMANCE.md`.
+**Measure**: aggregate tok/s, per-session tok/s, p95 TTFT.
+Find: concurrency where per-session drops below 180 tok/s (5s/turn).
 
-## Gate 9: Agentic trace + session concurrency
+## Gate G8: Context scaling (32K → 256K)
 
 ```bash
-python3 scripts/bench/bench_agent_trace.py 30 20000
+MAX_MODEL_LEN=262144 bash scripts/02_serve_vllm.sh qwen38
+python3 scripts/bench/bench_full.py prefill  # 8K/32K/100K/200K
+python3 scripts/bench/bench_long_context_recall.py --lengths 32000 128000 256000
+```
+
+**Pass**: all recall needles found, no OOM.
+
+## Gate G9: 384K / 512K extension
+
+```bash
+MAX_MODEL_LEN=524288 bash scripts/02_serve_vllm.sh qwen38  # YaRN factor 2.0
+python3 scripts/bench/bench_long_context_recall.py --lengths 384000 475000
+```
+
+**Measure**: recall at 384K/475K. If 384K drops → 512K is emergency ceiling only.
+Determine soft compaction threshold (256K/320K/384K).
+
+## Gate G10: Real agent replay
+
+```bash
+python3 scripts/bench/bench_agent_trace.py 30 20000     # 30-turn agent
 python3 scripts/bench/bench_session_concurrency.py --sessions 8 --rounds 4
 python3 scripts/bench/bench_session_concurrency.py --sessions 16 --rounds 4
-python3 scripts/bench/bench_session_concurrency.py --sessions 24 --rounds 4
-python3 scripts/bench/bench_session_concurrency.py --sessions 32 --rounds 4
 ```
 
-**Pass**: 30-turn cache hit > 90%; find the concurrency knee where per-session
-decode drops below 180 tok/s (5s/turn threshold). That knee is the interactive
-concurrency limit.
-
-## Gate 10: Cold TTFT isolation
-
-```bash
-python3 scripts/bench/bench_ttft_isolation.py 200000 --rounds 3
-```
-
-**Pass**: short-request added TTFT < +2.0s (the DeepSeek recipe's validated
-gate was +0.5s; +1.3s was reported as still-open). For Qwen3.8, the hybrid
-attention should make long prefill cheaper, so the isolation penalty may be
-smaller — but this is unmeasured.
+**Measure**: cache hit %, per-turn TTFT, end-to-end session completion time.
+This gate decides the production engine (vLLM vs SGLang).
 
 ## Post-validation
 
-If all gates pass, replace the estimates in `docs/PERFORMANCE.md` with the
-real numbers, change the header to "Validated Baseline", and record the commit
-hash + environment versions alongside each number.
+Replace all estimates in `docs/PERFORMANCE.md` with real numbers.
+Record commit hash + manifest + launch args alongside each result.
