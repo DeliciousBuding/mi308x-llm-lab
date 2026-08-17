@@ -32,7 +32,7 @@ SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-27b}"
 QUANT="${QUANT:-bf16}"
 
 # SGLang venv — SEPARATE from both vLLM venvs (DS0731 and Qwen3.8-vLLM)
-VENV_DIR="${SGLANG_VENV:-/root/.venvs/sglang-qwen}"
+VENV_DIR="${SGLANG_VENV:-/root/.venvs/sglang}"
 if [ -z "${USE_SYSTEM_SGLANG:-}" ] && [ -x "$VENV_DIR/bin/python" ]; then
   export PATH="$VENV_DIR/bin:$PATH"
   export VIRTUAL_ENV="$VENV_DIR"

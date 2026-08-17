@@ -17,7 +17,7 @@
 # =============================================================================
 set -euo pipefail
 
-VENV="${SGLANG_VENV:-/root/.venvs/sglang-qwen}"
+VENV="${SGLANG_VENV:-/root/.venvs/sglang}"
 WHEELS="${WHEELS:-/mnt/workspace/wheels}"
 SGLANG_WHEEL_DIR="$WHEELS/sglang"
 SGLANG_DEPS_DIR="$WHEELS/sglang-deps"
