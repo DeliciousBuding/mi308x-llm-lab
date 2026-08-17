@@ -131,8 +131,8 @@ from pip, then snapshots them for future restore).
 ### 7c. External API topology
 
 ```text
-client → relay:8000 → LiteLLM (127.0.0.1:4000) → vLLM (127.0.0.1:8000)
-client → relay:7860 → Studio (127.0.0.1:7860) → LiteLLM → vLLM
+client → public HTTPS endpoint (Cloudflare Tunnel) → LiteLLM → vLLM   (OpenAI API; LiteLLM master key required, no key → 401)
+Studio UI → local SSH forward only, not publicly exposed
 ```
 
 LiteLLM normalizes: `max_tokens` alias folding, output ceiling clamp
