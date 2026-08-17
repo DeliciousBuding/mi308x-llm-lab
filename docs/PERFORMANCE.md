@@ -1,75 +1,120 @@
-# Performance — Estimated Targets (pre-deployment)
+# Performance — Qwen3.8-27B on MI308X
 
-> **All numbers on this page are estimates, not validated measurements.**
-> Real-machine validation has not yet been performed. See
-> [`RESEARCH_NOTES.md`](RESEARCH_NOTES.md) for the methodology and
-> [`VALIDATION_PLAN.md`](VALIDATION_PLAN.md) for the measurement sequence.
->
-> Validated reference: the sibling DeepSeek-V4-Flash recipe on the same MI308X
-> (80 CU, gfx942, 192 GB) achieved decode-512 141.8 tok/s, C64 aggregate 914.6
-> tok/s, 500K endpoint 77.3s. See `deepseek-v4-flash-mi308x/docs/PERFORMANCE.md`.
+> **G1 measured on 2026-08-17** (vLLM path). Numbers below marked *measured* are
+> real-machine results; everything else is still an estimate.
+> Environment is pinned by `results/runtime_manifest.json`.
 
-## Hardware
+## Hardware (verified, G0)
 
 ```text
-GPU        MI308X / MI300X class, gfx942
-CUs        80 (reported by torch/rocminfo/AITER; NOT 304 like full MI300X)
-HBM        ~192 GiB
-ROCm       7.2.3
+GPU        gfx942:sramecc+:xnack-
+CUs        80                      (NOT 304 like a full MI300X)
+VRAM       205.8 GB
+ROCm       7.2.3 / HIP 7.2.53211
+torch      2.11.0+gitd0c8b1f
+/dev/shm   16 GB
+NUMA balancing  0 (disabled — matches AMD guidance)
 ```
 
-## Estimated decode throughput
+## G1: vLLM correctness reference (measured)
 
-Derived from the DeepSeek-V4-Flash validated baseline (same hardware) scaled
-by per-token compute ratio. See `RESEARCH_NOTES.md §3` for derivation.
+Launch: `MAX_MODEL_LEN=262144 MAX_NUM_SEQS=32 MTP_ENABLED=0 KV_OFFLOAD_GB=0`,
+BF16 weights, FP8 KV, prefix caching on, `--language-model-only`.
 
-| Metric | DeepSeek-V4-Flash (validated) | Qwen3.8-27B (estimated) |
-| --- | ---: | ---: |
-| decode-512 single stream | 141.8 tok/s | ~95-100 (BF16) / ~250-300 (MTP-3) |
-| C1 aggregate | 129.2 tok/s | ~90-100 |
-| C2 aggregate | 235.8 tok/s | ~180-200 |
-| C4 aggregate | 375.0 tok/s | ~350-400 |
-| C8 aggregate | 549.6 tok/s | ~500-550 |
-| C32 aggregate | 730.2 tok/s | ~700-750 |
-| C64 aggregate | 914.6 tok/s | ~850-920 |
+| Metric | Result |
+| --- | ---: |
+| Engine version | `0.26.1rc1.dev306+gcb8104839` |
+| Resolved architecture | `Qwen3_5ForConditionalGeneration` |
+| GDN prefill kernel | **Triton/FLA** (gfx942 path active) |
+| Mamba cache mode | `align` (prefix-caching compatible) |
+| **GPU KV cache size** | **3,892,752 tokens** |
+| **Max concurrency @262K** | **14.85x** |
+| Startup (compile+warmup+capture) | ~150 s |
+| torch.compile | 42.0 s |
+| Initial profiling/warmup | 52.9 s |
+| **decode-512, thinking off** | **54.7 tok/s** |
+| decode-4096, thinking off | 41.6 tok/s |
+| Basic generation correctness | PASS (`101, 103, 107`) |
+| Protocol fixtures | 5/6 → 6/6 after fixture fix |
 
-## Estimated long-context
+### KV capacity derived from the measured pool
 
-| Metric | DeepSeek-V4-Flash (validated) | Qwen3.8-27B (estimated) |
-| --- | ---: | ---: |
-| 500K cold prefill | 77.3s | ~20-30s (hybrid attn: 16/64 layers O(L²)) |
-| 100K prefill | ~10s | ~3-5s |
-| hot TTFT p95 | ~2.9s | est. ~1-2s (hybrid prefill cheaper) |
+3,892,752 tokens of FP8 KV, so concurrent sessions at a given context:
 
-## Estimated concurrency (agentic coding loop)
+| Context per session | Concurrent sessions |
+| ---: | ---: |
+| 80K | ~48 |
+| 262K | **14.85 (engine-reported)** |
+| 512K | ~7.4 |
 
-| Workload | Concurrency | Binding constraint |
-| --- | ---: | --- |
-| Interactive, websearch-heavy | ~20-30 | Decode throughput |
-| Interactive, pure coding | ~7-10 | Decode throughput |
-| Batch / background | ~40-60 | KV memory + admission |
-| All at 512K extreme | ~8-10 | KV memory |
+This validates the KV model in `RESEARCH_NOTES.md §2`: the earlier estimate of
+~50 sessions at 80K and ~8-10 at 512K matches the measured pool.
 
-## KV cache capacity
+### Decode throughput vs estimate
 
-| Config | KV pool | 512K sessions | 80K sessions |
-| --- | ---: | ---: | ---: |
-| BF16 weights + FP8 KV | ~142 GB | ~8 | ~50 |
-| FP8 weights + FP8 KV | ~169 GB | ~10 | ~60 |
-
-## Validation gates (all TBD)
+The estimate was ~95-100 tok/s (BF16 bandwidth-bound). Measured is **54.7 tok/s**
+— about 60% of the bandwidth-bound ceiling. Two fallbacks in the startup log are
+the leading suspects and are tuning targets for later gates:
 
 ```text
-[ ] 262K native serve + health
-[ ] YaRN factor 2.0 → 512K, 50K→500K ladder survival
-[ ] MTP-3 acceptance measurement (C1, C8, C32, C64)
-[ ] multi-needle exact recall 100K/256K/384K/475K
-[ ] decode ladder C1/C2/C4/C8/C32/C64
-[ ] agent trace 30-turn prefix-cache hit
-[ ] session concurrency sweep (knee finder)
-[ ] cold 200K TTFT isolation
-[ ] FP8 vs BF16 A/B
+WARNING  Cannot use ROCm custom paged attention kernel, falling back to Triton
+WARNING  aiter sampler does not support per-request generators; falling back to PyTorch-native
 ```
 
-When real measurements exist, they replace the estimates on this page and the
-file header changes from "Estimated Targets" to "Validated Baseline".
+Decode also degrades with generation length (54.7 tok/s @512 → 41.6 tok/s @4096),
+consistent with KV growth on the 16 full-attention layers.
+
+For context, the sibling DeepSeek-V4-Flash on the same host measures 33.4 tok/s
+native / 141.8 tok/s with DSpark. Qwen3.8 native is ~1.6× DS0731 native.
+
+## Open blocker: thinking mode returns empty output (mitigated)
+
+**Severity: was blocking Coding Agent use; a mitigation now exists.** With
+`reasoning_effort=xhigh` (the Qwen3.8 default), the `qwen3` reasoning parser
+returns **nothing at all** when the thinking block does not close before
+`max_tokens`:
+
+| Request | Tokens generated | content | reasoning_content | finish_reason |
+| --- | ---: | ---: | ---: | --- |
+| xhigh (default), max_tokens=512 | 512 | 0 chars | 0 chars | length |
+| xhigh (default), max_tokens=4096 | 4096 | 0 chars | 0 chars | length |
+| xhigh, max_tokens=2048 (stream) | 2048 | 0 chunks | 0 chunks | — |
+| **`reasoning_effort=low`, max_tokens=2048** | 2048 | **2,778 chars** | 0 | length |
+| **`reasoning_effort=medium`, max_tokens=4096** | 4096 | **11,516 chars** | 0 | length |
+| **`enable_thinking=false`, max_tokens=512** | 512 | **2,140 chars** | 0 | length |
+
+Not streaming-specific — non-streaming shows the same empty result. Tokens are
+generated and counted in `usage` but never surfaced to the client.
+
+Root cause: the parser buffers until `</think>`; at `xhigh` Qwen3.8 can think
+far longer than 4096 tokens, so the tag never arrives and the buffered output is
+discarded. The model card recommends budgeting up to 262,144 tokens for
+reasoning content, which confirms xhigh is not a small budget.
+
+**Mitigation**: set `reasoning_effort` to `low` or `medium`, or disable thinking.
+Any of the three produces usable output at ordinary `max_tokens`.
+
+**Secondary observation**: at `low`/`medium` the text lands in `content` with
+`reasoning_content` empty, so reasoning is not being split into its own field on
+this path. Harmless for agent use (the answer is present) but worth confirming
+before relying on hidden-reasoning behavior.
+
+**Decode cost of thinking**: 48.9 tok/s at `low`, 41.8 tok/s at `medium`, versus
+54.3 tok/s with thinking off — longer generations pay the KV-growth cost on the
+16 full-attention layers.
+
+## Validation gates
+
+```text
+[x] G0  system check
+[x] G1  vLLM 262K native, MTP off, C1 correctness + decode baseline
+[ ] G2  SGLang correctness            BLOCKED — see RESEARCH_NOTES §10
+[ ] G3  attention backend A/B
+[ ] G4  SSM dtype A/B                 (SGLang-only; blocked)
+[ ] G5  native / MTP-1 / MTP-2 / MTP-3
+[ ] G6  BF16 KV vs FP8 KV
+[ ] G7  concurrency knee C1..C32
+[ ] G8  context scaling 32K/128K/256K
+[ ] G9  384K/512K extension + recall
+[ ] G10 real agent replay
+```

@@ -18,6 +18,25 @@ BASE_URL = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000")
 MODEL_NAME = os.environ.get("VLLM_MODEL", "qwen3.8-27b")
 REQUEST_TIMEOUT = int(os.environ.get("VLLM_TIMEOUT", "3600"))
 
+# Qwen3.8 defaults to reasoning_effort=xhigh, and the qwen3 parser buffers until
+# </think>. At ordinary max_tokens the tag never arrives, so the response comes
+# back completely empty (measured: 4096 tokens generated, 0 chars returned).
+# Benchmarks therefore pin an explicit thinking config. Override per-run:
+#   BENCH_THINKING=off      -> enable_thinking: false        (fastest, default)
+#   BENCH_THINKING=low      -> reasoning_effort: low
+#   BENCH_THINKING=medium   -> reasoning_effort: medium
+#   BENCH_THINKING=xhigh    -> model default (WARNING: returns empty output)
+BENCH_THINKING = os.environ.get("BENCH_THINKING", "off").lower()
+
+
+def thinking_body_fields() -> dict:
+    """Return the request fields that pin the thinking configuration."""
+    if BENCH_THINKING == "off":
+        return {"chat_template_kwargs": {"enable_thinking": False}}
+    if BENCH_THINKING in ("low", "medium", "high", "xhigh"):
+        return {"reasoning_effort": BENCH_THINKING}
+    return {}
+
 
 def resolve_api_key() -> str:
     """Resolve credentials only when a request is actually sent.
@@ -71,6 +90,7 @@ def chat_completion(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
+    body_dict.update(thinking_body_fields())
     if extra:
         body_dict.update(extra)
     body = json.dumps(body_dict).encode()
@@ -116,6 +136,7 @@ def stream_completion(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    body_dict.update(thinking_body_fields())
     if extra:
         body_dict.update(extra)
     body = json.dumps(body_dict).encode()
