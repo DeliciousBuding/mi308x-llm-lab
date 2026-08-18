@@ -21,7 +21,7 @@ from bench_client import chat_completion, health_check
 NEEDLES = [
     "The magic password for the north gate is s3r3nd1p1ty-42.",
     "The deployment config file is named haiku-deploy-2026.yaml.",
-    "The secret API key for staging is sk-staging-7f3a9b2e1c.",
+    "The secret API key for staging is staging-7f3a9b2e1c.",
     "The third checkpoint is located in /opt/nexus/archive/ delta-7.",
     "The maintainer's favorite color is vermillion.",
 ]
