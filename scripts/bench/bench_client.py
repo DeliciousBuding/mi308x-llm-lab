@@ -148,7 +148,7 @@ def chat_completion(
             else 0
         ),
         "content": message.get("content", ""),
-        "reasoning_content": message.get("reasoning_content", ""),
+        "reasoning_content": message.get("reasoning") or message.get("reasoning_content") or "",
         "finish_reason": choice.get("finish_reason", ""),
         "tool_calls": message.get("tool_calls", []),
     }
@@ -182,6 +182,10 @@ def stream_completion(
     first_token_time = None
     last_token_time = None
     content_chunks: list[str] = []
+    reasoning_chunks: list[str] = []
+    tool_call_parts: dict[int, dict] = {}
+    role_assistant = False
+    finish_reason = ""
     usage_data = {}
 
     response_stream = urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT)
@@ -197,16 +201,36 @@ def stream_completion(
         except json.JSONDecodeError:
             continue
         if chunk.get("choices"):
-            delta = chunk["choices"][0].get("delta", {})
-            # Count both content and reasoning_content: in thinking mode the
-            # first emitted tokens are reasoning, and treating them as "not yet
-            # started" would fold decode time into TTFT.
-            if delta.get("content") or delta.get("reasoning_content"):
+            choice = chunk["choices"][0]
+            delta = choice.get("delta", {})
+            role_assistant = role_assistant or delta.get("role") == "assistant"
+            finish_reason = choice.get("finish_reason") or finish_reason
+            # Count both current ``reasoning`` and older ``reasoning_content``
+            # spellings: reasoning tokens are real streamed output for TTFT/ITL.
+            reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
+            if delta.get("content") or reasoning_delta or delta.get("tool_calls"):
                 if first_token_time is None:
                     first_token_time = time.time()
                 last_token_time = time.time()
             if delta.get("content"):
                 content_chunks.append(delta["content"])
+            if reasoning_delta:
+                reasoning_chunks.append(reasoning_delta)
+            for tool_delta in delta.get("tool_calls") or []:
+                index = int(tool_delta.get("index", 0))
+                part = tool_call_parts.setdefault(
+                    index,
+                    {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+                )
+                if tool_delta.get("id"):
+                    part["id"] = tool_delta["id"]
+                if tool_delta.get("type"):
+                    part["type"] = tool_delta["type"]
+                function_delta = tool_delta.get("function") or {}
+                if function_delta.get("name"):
+                    part["function"]["name"] += function_delta["name"]
+                if function_delta.get("arguments"):
+                    part["function"]["arguments"] += function_delta["arguments"]
         if chunk.get("usage"):
             usage_data = chunk["usage"]
 
@@ -230,6 +254,10 @@ def stream_completion(
             else 0
         ),
         "content": "".join(content_chunks),
+        "reasoning_content": "".join(reasoning_chunks),
+        "tool_calls": [tool_call_parts[i] for i in sorted(tool_call_parts)],
+        "role_assistant": role_assistant,
+        "finish_reason": finish_reason,
         "decode_rate": decode_rate,
     }
 

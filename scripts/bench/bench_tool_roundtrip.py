@@ -14,9 +14,10 @@ import argparse
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from bench_client import chat_completion, health_check
+from bench_client import health_check, repeated_text_for_tokens, stream_completion
 
 TOOL_DEFINITION = {
     "type": "function",
@@ -37,13 +38,13 @@ TOOL_DEFINITION = {
 }
 
 
-def make_prefix(target_tokens: int) -> str:
+def make_prefix(target_tokens: int) -> tuple[str, int]:
     unit = "Repository context: parser.py validates JSON configs with strict fields. "
-    return unit * max(1, target_tokens // 14)
+    return repeated_text_for_tokens(unit, target_tokens, prefix=f"tool-{time.time_ns()}\n")
 
 
 def run_tool_roundtrip(mode: str, prefix_tokens: int) -> dict:
-    prefix = make_prefix(prefix_tokens)
+    prefix, calibrated_prefix_tokens = make_prefix(prefix_tokens)
     messages = [
         {"role": "user", "content": prefix + "\n\nRead the file src/config.py and tell me what it does."},
     ]
@@ -52,7 +53,7 @@ def run_tool_roundtrip(mode: str, prefix_tokens: int) -> dict:
         "tool_choice": mode if mode != "auto" else "auto",
     }
 
-    first_response = chat_completion(messages, max_tokens=256, temperature=0.0, extra=extra)
+    first_response = stream_completion(messages, max_tokens=256, temperature=0.0, extra=extra)
     tool_calls = first_response.get("tool_calls", [])
 
     if not tool_calls:
@@ -67,12 +68,21 @@ def run_tool_roundtrip(mode: str, prefix_tokens: int) -> dict:
     tool_result_content = 'File src/config.py contains:\nDATABASE_URL = "localhost:5432"\nDEBUG = True'
     messages.append({"role": "tool", "content": tool_result_content})
 
-    final_response = chat_completion(messages, max_tokens=256, temperature=0.0)
+    final_response = stream_completion(messages, max_tokens=256, temperature=0.0)
     return {
-        "passed": bool(final_response["content"]),
+        "passed": (
+            first_response.get("role_assistant", False)
+            and first_response.get("finish_reason") == "tool_calls"
+            and bool(final_response["content"])
+            and final_response.get("role_assistant", False)
+        ),
         "tool_call": json.dumps(tool_calls[0], separators=(",", ":"))[:120] if tool_calls else "",
         "final_content": final_response["content"][:120],
-        "total_s": first_response["elapsed_s"] + final_response["elapsed_s"],
+        "calibrated_prefix_tokens": calibrated_prefix_tokens,
+        "tool_ttft": first_response["ttft_s"],
+        "final_ttft": final_response["ttft_s"],
+        "tool_finish": first_response.get("finish_reason", ""),
+        "total_s": first_response["total_s"] + final_response["total_s"],
     }
 
 
@@ -94,7 +104,13 @@ def main() -> int:
         status = "PASS" if result["passed"] else "FAIL"
         if result["passed"]:
             passed += 1
-        print(f"  round {round_index}: {status} | {result.get('tool_call', result.get('reason', ''))}")
+        print(
+            f"  round {round_index}: {status} | "
+            f"prefix={result.get('calibrated_prefix_tokens', 0)} "
+            f"tool_ttft={result.get('tool_ttft', 0):.3f}s "
+            f"final_ttft={result.get('final_ttft', 0):.3f}s | "
+            f"{result.get('tool_call', result.get('reason', ''))}"
+        )
         if not result["passed"]:
             print(f"    reason: {result.get('reason', 'unknown')}")
 

@@ -25,40 +25,16 @@ SESSION_PREFIX_UNIT = (
 )
 
 
-def run_single_session(session_id: int, num_rounds: int, session_prefix: str) -> dict:
-    messages = [
+def initial_messages(session_prefix: str) -> list[dict]:
+    return [
         {"role": "system", "content": "You are an expert coding agent."},
         {"role": "user", "content": session_prefix + "\n\nHelp me understand this codebase."},
     ]
-    total_decode = 0.0
-    total_tokens = 0
-    total_ttft = 0.0
-    total_prompt_tokens = 0
-    total_cached_tokens = 0
 
-    for round_index in range(num_rounds):
-        messages.append({"role": "user", "content": f"Round {round_index}: explain module {round_index}."})
-        result = stream_completion(messages, max_tokens=256)
-        messages.append({"role": "assistant", "content": result["content"]})
-        messages.append({"role": "tool", "content": f"module_{round_index} has {20+round_index*3} lines."})
-        total_decode += result["total_s"] - result["ttft_s"]
-        total_tokens += result["completion_tokens"]
-        total_ttft += result["ttft_s"]
-        total_prompt_tokens += result["prompt_tokens"]
-        total_cached_tokens += result["cached_tokens"]
 
-    avg_decode_rate = total_tokens / total_decode if total_decode > 0 else 0
-    avg_ttft = total_ttft / num_rounds
-    return {
-        "session_id": session_id,
-        "total_tokens": total_tokens,
-        "total_decode_s": total_decode,
-        "avg_decode_rate": avg_decode_rate,
-        "avg_ttft": avg_ttft,
-        "prompt_tokens": total_prompt_tokens,
-        "cached_tokens": total_cached_tokens,
-        "cache_hit": (total_cached_tokens / total_prompt_tokens if total_prompt_tokens else 0.0),
-    }
+def run_session_round(session_id: int, round_index: int, messages: list[dict]) -> tuple[int, dict]:
+    result = stream_completion(messages, max_tokens=256)
+    return session_id, result
 
 
 def main() -> int:
@@ -90,41 +66,83 @@ def main() -> int:
         f"target_prefix={args.prefix_tokens}, calibrated_range="
         f"{min(calibrated_counts)}-{max(calibrated_counts)} ==="
     )
-    start_time = time.time()
+    histories = [initial_messages(prefix) for prefix in session_prefixes]
+    round_summaries: list[dict] = []
+    total_all_tokens = 0
+    total_prompt_tokens = 0
+    total_cached_tokens = 0
+    overall_start = time.time()
+
     with concurrent.futures.ThreadPoolExecutor(args.sessions) as pool:
-        futures = [
-            pool.submit(run_single_session, session_id, args.rounds, session_prefixes[session_id])
-            for session_id in range(args.sessions)
-        ]
-        results = [f.result() for f in futures]
-    wall_time = time.time() - start_time
+        for round_index in range(args.rounds):
+            for session_id, messages in enumerate(histories):
+                messages.append({
+                    "role": "user",
+                    "content": f"Round {round_index}: explain module {round_index} for session {session_id}.",
+                })
 
-    total_all_tokens = sum(r["total_tokens"] for r in results)
-    avg_per_session_rate = sum(r["avg_decode_rate"] for r in results) / len(results)
-    avg_ttft = sum(r["avg_ttft"] for r in results) / len(results)
-    aggregate = total_all_tokens / wall_time
-    total_prompt_tokens = sum(r["prompt_tokens"] for r in results)
-    total_cached_tokens = sum(r["cached_tokens"] for r in results)
+            round_start = time.time()
+            futures = [
+                pool.submit(run_session_round, session_id, round_index, histories[session_id])
+                for session_id in range(args.sessions)
+            ]
+            round_results = dict(f.result() for f in futures)
+            round_wall = time.time() - round_start
+
+            for session_id, result in round_results.items():
+                histories[session_id].append({"role": "assistant", "content": result["content"]})
+                histories[session_id].append({
+                    "role": "tool",
+                    "content": f"module_{round_index} has {20 + round_index * 3} lines.",
+                })
+
+            round_tokens = sum(r["completion_tokens"] for r in round_results.values())
+            round_prompt = sum(r["prompt_tokens"] for r in round_results.values())
+            round_cached = sum(r["cached_tokens"] for r in round_results.values())
+            round_cache_hit = round_cached / round_prompt if round_prompt else 0.0
+            round_avg_ttft = sum(r["ttft_s"] for r in round_results.values()) / args.sessions
+            round_avg_decode = sum(r["decode_rate"] for r in round_results.values()) / args.sessions
+            round_aggregate = round_tokens / round_wall if round_wall > 0 else 0.0
+            summary = {
+                "round": round_index + 1,
+                "wall": round_wall,
+                "tokens": round_tokens,
+                "aggregate": round_aggregate,
+                "avg_decode": round_avg_decode,
+                "avg_ttft": round_avg_ttft,
+                "cache_hit": round_cache_hit,
+            }
+            round_summaries.append(summary)
+            total_all_tokens += round_tokens
+            total_prompt_tokens += round_prompt
+            total_cached_tokens += round_cached
+            print(
+                f"  round {round_index + 1}: wall={round_wall:.2f}s "
+                f"agg={round_aggregate:.1f} tok/s per_session={round_avg_decode:.1f} tok/s "
+                f"ttft={round_avg_ttft:.3f}s cache={round_cache_hit:.1%}",
+                flush=True,
+            )
+
+    wall_time = time.time() - overall_start
+    aggregate = total_all_tokens / wall_time if wall_time > 0 else 0.0
     overall_cache_hit = total_cached_tokens / total_prompt_tokens if total_prompt_tokens else 0.0
+    steady = round_summaries[1:] if len(round_summaries) > 1 else round_summaries
+    steady_decode = sum(r["avg_decode"] for r in steady) / len(steady)
+    steady_ttft = sum(r["avg_ttft"] for r in steady) / len(steady)
+    steady_cache = sum(r["cache_hit"] for r in steady) / len(steady)
 
-    print(f"\n  wall_time:        {wall_time:.2f}s")
+    print(f"\n  total wall_time:  {wall_time:.2f}s")
     print(f"  total tokens:     {total_all_tokens}")
     print(f"  aggregate:        {aggregate:.1f} tok/s")
-    print(f"  avg per-session:  {avg_per_session_rate:.1f} tok/s")
-    print(f"  avg TTFT:         {avg_ttft:.3f}s")
     print(f"  overall cache hit:{overall_cache_hit:9.1%}")
-    print(f"  per-session detail:")
-    for r in sorted(results, key=lambda x: x["session_id"]):
-        print(
-            f"    session {r['session_id']}: {r['avg_decode_rate']:.1f} tok/s, "
-            f"ttft={r['avg_ttft']:.3f}s, cache={r['cache_hit']:.1%}, "
-            f"{r['total_tokens']} tok"
-        )
+    print(f"  steady decode:    {steady_decode:.1f} tok/s/session")
+    print(f"  steady TTFT:      {steady_ttft:.3f}s")
+    print(f"  steady cache hit: {steady_cache:.1%}")
 
-    if avg_per_session_rate < args.min_decode_tps:
-        print(f"\n  >>> below {args.min_decode_tps:.0f} tok/s per-session interactive floor (knee found)")
+    if steady_decode < args.min_decode_tps:
+        print(f"\n  >>> below {args.min_decode_tps:.0f} tok/s steady per-session interactive floor (knee found)")
     else:
-        print(f"\n  PASS: >= {args.min_decode_tps:.0f} tok/s per-session interactive floor")
+        print(f"\n  PASS: steady >= {args.min_decode_tps:.0f} tok/s per-session interactive floor")
     return 0
 
 
