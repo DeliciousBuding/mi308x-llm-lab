@@ -19,6 +19,7 @@ models/
 *.mp4
 outputs/
 out/
+results/
 
 # Secrets / local state
 .bootstrap/
