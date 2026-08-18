@@ -157,13 +157,10 @@ python3 scripts/bench/bench_agent_trace.py 30 20000
 
 Promoted 2026-08-18 after the G3/G5 gates (`docs/PERFORMANCE.md`). The launcher
 defaults now match the validated runtime: UNIFIED_ATTN + block 64, MTP-3, and
-**GPU-only KV**. The 524,288-token YaRN ceiling has passed startup/capacity
-validation; correctness-sensitive deployments can pin `MAX_MODEL_LEN=262144`
-until the remaining 256K/512K recall ladder is complete:
+**GPU-only KV**. Production now targets native `MAX_MODEL_LEN=262144` for multi-round coding-agent/tool-loop traffic; 512K YaRN remains an explicit experiment rather than a production default. Vision is enabled and thinking is disabled by default, with request-level overrides still supported:
 
 ```text
---max-model-len 524288                    (YaRN factor 2.0 over 262K native)
---hf-overrides '{"text_config":{"rope_parameters":{...,"factor":2.0,...}}}'
+--max-model-len 262144                    (native; no YaRN in production)
 --attention-backend ROCM_AITER_UNIFIED_ATTN   (required: head_dim=256)
 --block-size 64
 --kv-cache-dtype fp8
@@ -171,7 +168,8 @@ until the remaining 256K/512K recall ladder is complete:
 --max-num-seqs 32                         (interactive) / 64 (batch)
 --max-num-batched-tokens 3072             (coding-agent latency profile)
 --tensor-parallel-size 1
---language-model-only                     (skip vision encoder, text-only)
+Vision encoder enabled; `--limit-mm-per-prompt {"image":1,"video":0}`
+--default-chat-template-kwargs '{"enable_thinking":false}'
 --reasoning-parser qwen3
 --tool-call-parser qwen3_coder
 --enable-auto-tool-choice

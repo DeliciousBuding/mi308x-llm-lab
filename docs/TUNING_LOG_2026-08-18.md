@@ -94,4 +94,42 @@ Runtime after switching the production ceiling to native 262,144:
 - C8 / 256-token fixture: 379.1 tok/s aggregate, 47.4/session
 - C16 / 256-token fixture: 708.1 tok/s aggregate, 44.3/session
 
-Assessment: 3072 strongly protects decode/ITL but chunks agent prefills aggressively. It is the control for 8192 and 16384 scheduler budgets.
+Assessment: 3072 strongly protects decode/ITL but chunks agent prefills aggressively. It is the control for larger scheduler budgets.
+
+## 5. Scheduler A/B findings: 8192 budget
+
+### 8192 with the old 1024 long-prefill cap
+
+Increasing only `max_num_batched_tokens` from 3072 to 8192 produced almost no agent-latency benefit because `long_prefill_token_threshold=1024` still clamps each long prefill scheduling step to 1024 tokens.
+
+- C1 512-output-token: warm TTFT ~0.086 s; avg decode 93.0 tok/s
+- 12-turn ~20K agent trace: effectively identical TTFT/cache behavior to the 3072 baseline
+- C8: 379.9 tok/s aggregate
+- C16: 717.2 tok/s aggregate
+- GPU KV capacity: 3,432,768 tokens
+
+Conclusion: the 1024 long-prefill cap, not the total 3072 token budget, is the main limiter for agent prefill latency.
+
+### 8192 with long-prefill cap disabled (`threshold=0`)
+
+Disabling the per-request long-prefill cap allowed the 8192 budget to be used by a single long prompt, but it is unsafe for interactive multi-agent traffic:
+
+- C1 512-output-token warm TTFT: 0.085–0.132 s; avg decode 94.3 tok/s
+- warm ~20K multi-turn trace: most turns ~0.95–1.54 s TTFT, with align-boundary spikes around 2.8 s
+- 64K TTFT isolation: short-request added TTFT **+17.692 s / +17.575 s**, average **+17.634 s** → FAIL
+- during isolation: 2 requests running, 0 waiting, GPU 100%; the short request was co-scheduled but still suffered from the very large prefill compute chunk
+- GPU KV capacity: 3,443,019 tokens
+
+Conclusion: `threshold=0` improves the ability to consume long prefills but destroys short-request isolation. Do not promote.
+
+### Prefix-cache observation
+
+Qwen3.8/Qwen3.5 hybrid caching is in Mamba `align` mode. The measured attention/Mamba aligned block size is **1600 tokens**. Cache hits jump at 1600-token boundaries (for example 16,000 → 17,600 cached tokens), and TTFT varies with those boundaries. This matches the known experimental behavior of vLLM hybrid/Mamba prefix caching; benchmark turn 1 must use a salted first block to avoid false warm results.
+
+The local `bench_agent_trace.py` is being extended with `--cold-prefix` for that purpose.
+
+### Current vLLM version constraint
+
+Latest vLLM exposes `max_num_partial_prefills` and `max_long_partial_prefills`, including the documented pattern `max_long_partial_prefills < max_num_partial_prefills` so short prompts can jump ahead of long prefills. The pinned ROCm dev306 runtime does **not** contain these SchedulerConfig fields or CLI arguments. Do not upgrade the validated ROCm runtime solely for this feature; record it as a future upgrade gate.
+
+Next safe A/B: keep total budget 8192 and test intermediate long-prefill caps (4096, then 2048 if isolation is still excessive).

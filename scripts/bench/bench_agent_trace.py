@@ -49,12 +49,16 @@ def make_repo_context(target_tokens: int) -> str:
     return REPO_CONTEXT_UNIT * max(1, target_tokens // 40)
 
 
-def run_agent_trace(num_turns: int, prefix_tokens: int) -> int:
+def run_agent_trace(num_turns: int, prefix_tokens: int, cold_prefix: bool = False) -> int:
     if not health_check():
         print("ERROR: server not healthy")
         return 1
 
     repo_context = make_repo_context(prefix_tokens)
+    if cold_prefix:
+        # Salt the first cache block so a previous deterministic benchmark run
+        # cannot make turn 1 look artificially warm.
+        repo_context = f"cold-prefix-{time.time_ns()}\n" + repo_context
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": repo_context + "\n\nHelp me understand this codebase."},
@@ -114,8 +118,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Coding-agent multi-turn benchmark")
     parser.add_argument("num_turns", type=int, nargs="?", default=30, help="number of agent turns")
     parser.add_argument("prefix_tokens", type=int, nargs="?", default=20000, help="prefix context tokens")
+    parser.add_argument("--cold-prefix", action="store_true", help="salt the first cache block so turn 1 is guaranteed cold")
     args = parser.parse_args()
-    return run_agent_trace(args.num_turns, args.prefix_tokens)
+    return run_agent_trace(args.num_turns, args.prefix_tokens, args.cold_prefix)
 
 
 if __name__ == "__main__":
