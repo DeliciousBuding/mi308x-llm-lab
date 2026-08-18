@@ -69,3 +69,29 @@ Optimization priorities, in order:
 6. cold-start restoration from persistent venv/JIT snapshots
 
 Controlled scheduler A/B will start from the existing `max_num_batched_tokens=3072`, `max_num_seqs=32`, `long_prefill_token_threshold=1024`, MTP-3 baseline and compare larger batched-token budgets for TTFT/throughput. Promotion must be based on agent-trace/TTFT/concurrency measurements, not warning suppression alone.
+
+## 4. Native-256K scheduler A/B — baseline (`max_num_batched_tokens=3072`)
+
+Runtime after switching the production ceiling to native 262,144:
+
+- YaRN disabled
+- Vision enabled, one image / no video
+- default thinking off; explicit override supported
+- available GPU KV: 121.84 GiB
+- GPU KV capacity: 3,438,626 tokens
+- engine init for the new 256K scheduler/compile shape: 137.98 s; compilation 51.37 s
+- steady VRAM: ~188.72 GB
+
+3072 baseline measurements:
+
+- C1 512-token output: cold-shape TTFT 4.966 s; warm TTFT 0.074 / 0.086 s; avg decode 94.2 tok/s; MTP acceptance 56–65%
+- 12-turn agent trace with ~20K initial repository prefix:
+  - turn 1 cold TTFT 12.05 s
+  - turns 2–10: 16,000 cached tokens (~83–86% hit), TTFT 1.67–2.78 s
+  - turns 11–12: 17,600 cached (~91% hit), TTFT 1.09–1.32 s
+  - overall prefix-cache hit 78.62%
+  - average decode 78.2 tok/s (short natural-stop outputs after the first turn)
+- C8 / 256-token fixture: 379.1 tok/s aggregate, 47.4/session
+- C16 / 256-token fixture: 708.1 tok/s aggregate, 44.3/session
+
+Assessment: 3072 strongly protects decode/ITL but chunks agent prefills aggressively. It is the control for 8192 and 16384 scheduler budgets.
