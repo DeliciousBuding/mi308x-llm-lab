@@ -13,14 +13,17 @@
 
 </div>
 
-> **Status: validated on MI308X (2026-08-18).** Full G-gate campaign (G0-G10)
-> completed on the same 192 GB gfx942 hardware validated for
-> DeepSeek-V4-Flash-0731; real-machine numbers are in
-> [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Headline results: MTP-3
-> acceptance ~65%, C1 decode 94.2 tok/s, C32 aggregate 1094 tok/s, 512K YaRN
-> server live, 30-turn agent prefix-cache hit 84%, tool-call round-trip 5/5.
-> The concurrency model in [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md)
-> was confirmed against measured decode throughput and the measured KV pool.
+> **Status: validated on MI308X (2026-08-18).** The production vLLM path is
+> validated on the 192 GB gfx942 host: G0/G1/G3/G5/G7/G8/G10 passed, while G9
+> has validated 512K YaRN startup + KV capacity but not the 256K/512K recall
+> ladder. G6 (BF16-vs-FP8 KV) remains pending; the SGLang-only G2/G4 path is
+> blocked on ROCm and is not part of the production recipe. Real-machine
+> numbers are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Headline results:
+> MTP-3 acceptance ~65%, C1 decode 94.2 tok/s, C32 aggregate 1094 tok/s,
+> 30-turn agent prefix-cache hit 84%, tool-call round-trip 5/5. The original
+> pre-deployment estimates in [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md)
+> are retained for methodology but are superseded by measured results where
+> the two differ.
 
 ## Why Qwen3.8-27B on gfx942
 
@@ -150,12 +153,13 @@ curl -s http://localhost:8000/health
 python3 scripts/bench/bench_agent_trace.py 30 20000
 ```
 
-## Validated production profile
+## Validated serving profile
 
-Promoted 2026-08-18 after the G3/G5 gates (`docs/PERFORMANCE.md`). The two
-non-obvious requirements are the attention backend (head_dim=256, see "Known
-ROCm gotchas") and **GPU-only KV** — CPU-KV offload is unstable for Qwen3.8,
-unlike the DeepSeek sibling which runs a 12 GB CPU tier:
+Promoted 2026-08-18 after the G3/G5 gates (`docs/PERFORMANCE.md`). The launcher
+defaults now match the validated runtime: UNIFIED_ATTN + block 64, MTP-3, and
+**GPU-only KV**. The 524,288-token YaRN ceiling has passed startup/capacity
+validation; correctness-sensitive deployments can pin `MAX_MODEL_LEN=262144`
+until the remaining 256K/512K recall ladder is complete:
 
 ```text
 --max-model-len 524288                    (YaRN factor 2.0 over 262K native)
@@ -215,6 +219,7 @@ MAX_BATCHED_TOKENS=4096 bash scripts/02_serve_vllm.sh qwen38
 | `PERSIST_DIR` | `<persistent-storage>/.venvs` | venv/JIT snapshots |
 | `VLLM_VENV` | `<local-disk>/.venvs/vllm-qwen` | active serving venv |
 | `QUANT` | `bf16` | checkpoint variant (`bf16` or `fp8`) |
+| `KV_CACHE_DTYPE` | `fp8` | KV cache dtype; use `auto` for the pending model-dtype/BF16 G6 control |
 | `VLLM_API_KEY` / `VLLM_API_KEY_FILE` | *(unset)* | optional serving/client auth |
 | `VLLM_BASE_URL` | `http://127.0.0.1:8000` | benchmark client endpoint |
 

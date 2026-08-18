@@ -1,8 +1,11 @@
 # Performance — Qwen3.8-27B on MI308X
 
-> **G1 measured on 2026-08-17** (vLLM path). Numbers below marked *measured* are
-> real-machine results; everything else is still an estimate.
-> Environment is pinned by `results/runtime_manifest.json`.
+> **Measured on 2026-08-17/18** on the vLLM path. G0/G1/G3/G5/G7/G8/G10 are
+> complete; G9 has validated 512K YaRN startup/capacity but not the remaining
+> 256K/512K recall ladder. G6 (BF16-vs-FP8 KV) remains pending; G2/G4 are
+> SGLang-only and blocked on ROCm. Any remaining estimates are labeled
+> explicitly. Environment provenance is captured by the benchmark runtime
+> manifest when results are generated.
 
 ## Hardware (verified, G0)
 
@@ -134,6 +137,7 @@ that does not hit the head_dim=256 restriction.
 agentic coding loops where turns can be 900+ tokens.
 
 **Remaining warnings** (non-critical):
+
 - `aiter sampler does not support per-request generators; falling back to PyTorch-native`
 - `Triton kernel JIT compilation during inference: kernel_unified_attention_2d` (warmup issue)
 - `PyTorch's native GELU with tanh approximation is unstable` (minor)
@@ -324,5 +328,5 @@ arguments. No raw chat-template leakage.
 [x] G7  concurrency knee C1..C32      C32=34.2 tok/s, agg=1094; knee ~C8 interactive
 [x] G8  context scaling 32K/128K      warm 128K=5.0s (cold 374s was JIT, not prefill)
 [x] G10 agent trace 30-turn           cache hit 84%, warm TTFT <2.5s, decode 82.5, tool 5/5
-[ ] G9  384K/512K extension + recall  requires YaRN restart; 100K+ decode marginal
+[~] G9  512K YaRN startup/capacity       server PASS; 256K/512K recall ladder still pending
 ```

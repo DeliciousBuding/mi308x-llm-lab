@@ -1,9 +1,17 @@
 # Research Notes — Qwen3.8-27B Concurrency & ROCm Support
 
-> Status: **structured estimate (±40% confidence)**, not validated measurements.
-> Last updated: 2026-08-17.
-> Validated numbers from the sibling DeepSeek-V4-Flash recipe are cited from
-> `infra/docs/SERVE_OPS.md` (private) and `deepseek-v4-flash-mi308x/docs/PERFORMANCE.md` (public).
+> Status: **pre-deployment research + estimation record**. Sections that derive
+> capacity/throughput from first principles are intentionally preserved as the
+> original hypothesis; measured Qwen3.8 results from 2026-08-17/18 supersede
+> those estimates wherever they differ. The measurement SSOT is
+> [`PERFORMANCE.md`](PERFORMANCE.md), and live gate status is in
+> [`VALIDATION_PLAN.md`](VALIDATION_PLAN.md).
+>
+> Validation delta: MTP-3 acceptance is ~65%; measured C1 is 94.2 tok/s and C32
+> aggregate is 1094 tok/s; FP8 KV pool is ~3.92M tokens at the native profile;
+> interactive concurrency is ~8-16 rather than the original ~20-30 estimate;
+> SGLang is blocked on ROCm in this environment; 512K YaRN startup/capacity is
+> validated but the 256K/512K recall ladder and G6 KV-dtype A/B remain pending.
 
 ## 1. Model architecture (the decisive fact)
 
@@ -51,11 +59,14 @@ Per-token per full-attn layer = `num_kv_heads × head_dim × 2 (K+V) × dtype_by
 ### 2.2 192 GB memory budget
 
 Same hardware as the DeepSeek-V4-Flash deployment: MI308X / gfx942 / 80 CU /
-~192 GiB HBM. The DeepSeek recipe's validated defaults (`SERVE_OPS.md §7`):
-`KV_CACHE_BYTES=16GB` GPU pin + `KV_OFFLOAD_GB=12` CPU tier (16 GB `/dev/shm`
-host constraint).
+~192 GiB HBM. The pre-deployment estimate initially borrowed the DeepSeek
+recipe's validated `KV_CACHE_BYTES=16GB` GPU pin + `KV_OFFLOAD_GB=12` CPU tier.
+**That assumption was later invalidated for Qwen3.8**: native CPU-KV offload
+hits `madvise(EINVAL)`, so measured Qwen capacity uses GPU-only KV. The table
+below is retained only to show the original estimate; use `PERFORMANCE.md` for
+measured capacity.
 
-| Weight config | Weights | Available for KV + overhead | Effective KV pool | 512K extreme | 80K typical |
+| Weight config | Weights | Available for KV + overhead | Original estimated pool | 512K extreme | 80K typical |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | BF16 weights + FP8 KV | 54 GB | ~130 GB | ~142 GB (incl 12 GB CPU) | ~8 sessions | ~50 sessions |
 | **FP8 weights + FP8 KV** | 27 GB | ~157 GB | ~169 GB | ~10 sessions | ~60 sessions |
@@ -132,7 +143,7 @@ Concurrency bound = `R_engine × T_turn / 900`, where `T_turn = T_decode + T_too
 
 `MAX_NUM_SEQS=64` is the admission hard cap; all rows ≤ 64.
 
-## 6. Conclusion
+## 6. Original pre-deployment conclusion (superseded by measured results)
 
 | Workload | Concurrency | Binding constraint |
 | --- | ---: | --- |
@@ -148,7 +159,7 @@ worst-case memory limit — simultaneously filling it caps at ~8-10 sessions.
 
 ## 7. Contrast with DeepSeek-V4-Flash (validated)
 
-| Dimension | DeepSeek-V4-Flash (validated) | Qwen3.8-27B (estimated) |
+| Dimension | DeepSeek-V4-Flash (validated) | Qwen3.8-27B (original estimate; see PERFORMANCE for measured) |
 | --- | --- | --- |
 | MAX_NUM_SEQS | 64 | 64 (same admission) |
 | 524K/512K extreme concurrency | ~64 (MLA KV tiny) | ~8-10 (GQA KV 8-16× larger) |
@@ -228,9 +239,10 @@ MTP-1: 64.8% acceptance, NOT worth it (+3.4% at C1, -9% at C128, -23% at C256)
 MTP config: `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`
 
 The model card confirms Qwen3.8-27B has MTP ("trained with multiple steps").
-The vLLM MTP docs list `method: mtp` as the native multi-token path. **MTP-3 is
-the starting point; MTP acceptance on gfx942 for the 27B dense is unmeasured
-and is a validation priority.**
+The vLLM MTP docs list `method: mtp` as the native multi-token path. This was a
+pre-deployment uncertainty; G5 later measured **~65% mean MTP-3 acceptance** on
+gfx942 and promoted MTP-3 as the default. See `PERFORMANCE.md` for the measured
+C1/C32 curve.
 
 ### 8.5 Checkpoint inventory
 
@@ -244,14 +256,14 @@ and is a validation priority.**
 **MXFP4 does not load on NVIDIA devices** (vLLM missing linear-method support).
 On AMD/gfx942, the FP8 checkpoint is the right quantization path.
 
-## 9. Risks (ordered by severity, updated 2026-08-17)
+## 9. Remaining risks (updated 2026-08-18)
 
 1. **80-CU compute is real**: this host reports 80 CUs, not MI300X's 304. The
    DeepSeek-V4-Flash 914 tok/s is the validated ceiling proxy. Published
    MI300X benchmarks will overestimate by ~3-4×.
-2. **MTP acceptance on gfx942**: unmeasured for Qwen3.8-27B dense. MTP-3 is
-   the starting point; if acceptance is low, single-stream decode drops to
-   ~95-100 tok/s (bandwidth-bound), pushing interactive concurrency down.
+2. **Long-context quality ceiling**: 512K YaRN startup and KV capacity are
+   validated, but the 256K/512K-class exact-recall ladder is still pending.
+   Treat 512K as a serving ceiling rather than a fully validated quality ceiling.
 3. **GDN state allocation** (vllm-metal#400): Qwen3.5 hybrid models allocate
    GDN recurrent state for `max_num_seqs` at startup. With 48 GDN layers,
    this can be ~5 GB at `max_num_seqs=64` on top of the KV budget. **Start
@@ -272,26 +284,20 @@ On AMD/gfx942, the FP8 checkpoint is the right quantization path.
    DeepSeek repo are keyed for DeepSeek GEMM shapes. Qwen3.8's dense GEMMs are
    more standard and may work with default AITER tables, but a tuning pass is
    a post-deployment optimization.
-8. **`/dev/shm` 16 GB** limits CPU KV offload to 12 GB (same host constraint as
-   DeepSeek-V4-Flash).
+8. **CPU-KV offload is unsafe for Qwen3.8 on this sandbox**: native offload
+   hits `madvise(MADV_POPULATE_WRITE)` EINVAL. The launcher therefore defaults
+   to `KV_OFFLOAD_GB=0`; only re-enable it for an explicit regression test.
 
-## 10. Recommended validation sequence
+## 10. Remaining validation work
 
-1. **Architecture import check** (CPU-cheap): verify `Qwen3_5ForCausalLM` is
-   registered and the Gated DeltaNet Triton kernel imports on the dev306 venv.
-2. **262K native serve + health**: serve at native context, confirm
-   `/health`, `/v1/models`, a short chat completion, and a tool-call round trip.
-3. **MTP-3 acceptance measurement**: decode-512 with and without MTP, compare
-   tok/s and acceptance rate at C1.
-4. **YaRN 512K extension**: serve with `factor=2.0`, confirm 50K→500K ladder
-   survival, then multi-needle exact recall at 100K/256K/384K/475K.
-5. **Decode throughput ladder**: C1/C2/C4/C8/C32/C64 aggregate, MTP vs native.
-6. **Agentic trace benchmark**: `bench_agent_trace.py 30 20000`, measure
-   per-request prefix-cache hit and TTFT.
-7. **Session concurrency sweep**: `bench_session_concurrency.py` at 4/8/16/24/32
-   sessions, find the knee where per-session decode drops below 180 tok/s
-   (5s/turn threshold).
-8. **Cold-isolation**: `bench_ttft_isolation.py 200000 --rounds 3` — short
-   request injected during long prefill.
-9. **FP8 vs BF16 A/B**: repeat the decode ladder and 512K ladder with FP8
-   weights, quantify the KV headroom and quality tradeoff.
+The live gate checklist is `VALIDATION_PLAN.md`; do not maintain a second full
+sequence here. The unresolved research questions are:
+
+1. **G6 KV dtype A/B**: compare current FP8 KV against model-dtype (`auto` on
+   BF16 weights) for capacity, recall, and decode stability.
+2. **G9 long-context quality**: complete the 256K/512K-class exact-recall
+   ladder before calling 512K a validated quality ceiling.
+3. **Scheduler/isolation tuning**: sweep `MAX_BATCHED_TOKENS` and long-prefill
+   isolation only if it materially improves the measured agent-loop profile.
+4. **AITER tuning coverage**: tune Qwen3.8 dense GEMM shapes only after the
+   correctness gates above are closed.

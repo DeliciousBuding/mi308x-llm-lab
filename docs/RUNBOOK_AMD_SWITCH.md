@@ -153,7 +153,7 @@ python3 /mnt/workspace/qwen3-8-27b-mi308x/scripts/bench/bench_full.py all
 bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/03_benchmark.sh
 ```
 
-Record results in `docs/PERFORMANCE.md`, replacing estimates with real numbers.
+Record new real-machine results in `docs/PERFORMANCE.md`, update gate status in `docs/VALIDATION_PLAN.md`, and keep pre-deployment estimates/methodology in `docs/RESEARCH_NOTES.md` as historical research context.
 
 ## Quick reference: serve config knobs
 

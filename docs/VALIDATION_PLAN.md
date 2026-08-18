@@ -1,131 +1,139 @@
 # Validation Plan — Qwen3.8-27B on MI308X
 
-> Gate sequence designed to isolate variables: each gate changes ONE thing.
-> Do NOT skip ahead — every gate validates the previous gate's assumptions.
-> Core principle: **correctness → engine A/B → state dtype → attention backend
-> → MTP → KV dtype → scheduler → concurrency → 512K → real Agent loop**
+> Gate sequence isolates variables: correctness → attention backend → MTP → KV
+> dtype → scheduler/concurrency → long context → real agent loop.
+>
+> **Status as of 2026-08-18:** the production vLLM path is validated through
+> G0/G1/G3/G5/G7/G8/G10. G9 has passed 512K YaRN startup/capacity but the
+> 256K/512K recall ladder remains pending. G6 is pending. G2/G4 were SGLang-only
+> experiments and are blocked on ROCm (`sgl_kernel` is CUDA-only in this
+> environment), so they are not production gates.
 
-## Gate G0: System check (no model)
+## Gate G0: System check — PASS
 
 ```bash
 ssh <gpu-host> 'python3 -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.get_device_properties(0).total_memory//1e9, \"GB\")"'
 rocm-smi --showproductname
-# Check: NUMA balancing, transparent hugepage, GPU power limit
 cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo "n/a"
 ```
 
-**Pass**: `+gitd0c8b1f` torch, gfx942, 192GB VRAM, 80 CU.
+Validated: ROCm platform torch, gfx942, 192 GB-class VRAM, 80 CU, NUMA balancing
+disabled. Exact measured environment is recorded in `docs/PERFORMANCE.md`.
 
-## Gate G1: vLLM correctness reference
+## Gate G1: vLLM correctness reference — PASS
 
 ```bash
-# vLLM · 262K native · BF16 weights · BF16 KV · MTP OFF · C1
-MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
+ATTENTION_BACKEND= BLOCK_SIZE=256 MAX_MODEL_LEN=262144 \
+MTP_ENABLED=0 KV_OFFLOAD_GB=0 KV_CACHE_DTYPE=fp8 \
   bash scripts/02_serve_vllm.sh qwen38
-# Verify: /health 200, /v1/models, short chat, reasoning_content present
 ```
 
-**Pass**: coherent output with reasoning_content, tool calls parse correctly.
+Validated: `/health`, `/v1/models`, short generation, reasoning/tool protocol
+fixtures, and the native-decode baseline. See `docs/PERFORMANCE.md` for numbers.
 
-## Gate G2: SGLang correctness reference
+## Gate G2: SGLang correctness reference — BLOCKED / RETIRED
+
+The SGLang path is not executable in this DSW ROCm environment because the
+available `sgl_kernel` wheel is CUDA-only (`libnvrtc.so.13`). The reference
+launcher remains in the repository for research, but production validation does
+not wait on this gate.
+
+## Gate G3: vLLM attention backend A/B — PASS
+
+The actual sweep compared the default/fallback path against
+`ROCM_AITER_UNIFIED_ATTN` for Qwen3.8's head_dim=256 layers.
 
 ```bash
-# SGLang · 262K native · float32 SSM · no_buffer · MTP OFF · C1
-MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
-  bash scripts/02_serve_sglang.sh qwen38
-# Verify same as G1
+# Control: automatic backend
+ATTENTION_BACKEND= BLOCK_SIZE=256 MTP_ENABLED=0 KV_OFFLOAD_GB=0 \
+  bash scripts/02_serve_vllm.sh qwen38
+
+# Promoted backend
+ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN BLOCK_SIZE=64 \
+MTP_ENABLED=0 KV_OFFLOAD_GB=0 \
+  bash scripts/02_serve_vllm.sh qwen38
 ```
 
-**Pass**: same correctness as G1. If SGLang fails to start → fallback to vLLM.
+Result: UNIFIED_ATTN removes the head_dim=256 fallback and improves decode,
+especially at longer generations. It is now the launcher default.
 
-## Gate G3: Attention backend sweep (SGLang only)
+## Gate G4: SSM dtype A/B — NOT APPLICABLE
 
-```bash
-# Triton (default) vs AITER
-ATTENTION_BACKEND=aiter MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
-  bash scripts/02_serve_sglang.sh qwen38
-```
+This was SGLang-only. Because G2 is blocked, G4 is retired for the current
+vLLM production recipe.
 
-**Measure**: decode-512 tok/s, TTFT p95. Pick winner for subsequent gates.
-
-## Gate G4: SSM dtype A/B (SGLang only)
+## Gate G5: MTP sweep — PASS
 
 ```bash
-# FP32 (correctness reference) vs BF16 (production candidate)
-MAMBA_SSM_DTYPE=bfloat16 MAX_MODEL_LEN=262144 MTP_ENABLED=0 \
-  bash scripts/02_serve_sglang.sh qwen38
-# Run multi-needle recall at 128K/256K/384K
-```
-
-**Measure**: decode tok/s, GDN state pool size (from logs), recall accuracy.
-BF16 has cumulative drift risk at 200K+. Keep FP32 if recall drops.
-
-## Gate G5: Speculative decoding sweep
-
-```bash
-# native / MTP-1 / MTP-2 / MTP-3 (both engines)
+MTP_ENABLED=0 bash scripts/02_serve_vllm.sh qwen38
 MTP_ENABLED=1 MTP_K=1 bash scripts/02_serve_vllm.sh qwen38
 MTP_ENABLED=1 MTP_K=2 bash scripts/02_serve_vllm.sh qwen38
 MTP_ENABLED=1 MTP_K=3 bash scripts/02_serve_vllm.sh qwen38
-# Repeat for SGLang with MTP_STEPS=1/2/3
 ```
 
-**Measure**: decode-512 tok/s, MTP acceptance rate (from /metrics).
-MTP-1 may regress at high concurrency. Find the knee.
+Result: MTP-3 is promoted; mean acceptance is about 65%, C1 reaches 94.2 tok/s,
+and C32 aggregate reaches 1094 tok/s. MTP-1 regresses at high concurrency.
 
-## Gate G6: KV dtype A/B
+## Gate G6: BF16 KV vs FP8 KV — PENDING
 
 ```bash
-# BF16 KV (correctness) vs FP8 KV (capacity)
-KV_CACHE_DTYPE=fp8 bash scripts/02_serve_vllm.sh qwen38   # vLLM
-# SGLang: --kv-cache-dtype fp8 (already default in serve script)
+# Current validated serving path uses FP8 KV.
+KV_CACHE_DTYPE=fp8 bash scripts/02_serve_vllm.sh qwen38
+# Model-dtype control (BF16 when QUANT=bf16).
+KV_CACHE_DTYPE=auto bash scripts/02_serve_vllm.sh qwen38
 ```
 
-**Measure**: KV pool size, max concurrent sessions, recall at 256K.
-FP8 KV ≈ 2× capacity. Likely production profile.
+Pending: run the model-dtype/BF16 correctness-capacity control and quantify the
+quality/capacity tradeoff. Do not infer this result from weight quantization.
 
-## Gate G7: Concurrency knee
+## Gate G7: Concurrency knee — PASS
 
 ```bash
 python3 scripts/bench/bench_high_concurrency.py --concurrencies 1 2 5 10 16 24 32
-# Also: agent occupancy benchmark (N agents, mixed decode/prefill/idle)
 ```
 
-**Measure**: aggregate tok/s, per-session tok/s, p95 TTFT.
-Find: concurrency where per-session drops below 180 tok/s (5s/turn).
+Measured through C32. The interactive knee and aggregate throughput are recorded
+in `docs/PERFORMANCE.md`.
 
-## Gate G8: Context scaling (32K → 256K)
+## Gate G8: Context scaling — PASS for measured 32K/128K range
 
 ```bash
 MAX_MODEL_LEN=262144 bash scripts/02_serve_vllm.sh qwen38
-python3 scripts/bench/bench_full.py prefill  # 8K/32K/100K/200K
-python3 scripts/bench/bench_long_context_recall.py --lengths 32000 128000 256000
+python3 scripts/bench/bench_full.py prefill
+python3 scripts/bench/bench_long_context_recall.py --lengths 32000 128000
 ```
 
-**Pass**: all recall needles found, no OOM.
+Warm 128K prefill is fast; the very large cold latency was dominated by Triton
+JIT. Decode slows materially at long context, so warmup coverage matters.
 
-## Gate G9: 384K / 512K extension
+## Gate G9: 512K YaRN extension — PARTIAL
 
 ```bash
-MAX_MODEL_LEN=524288 bash scripts/02_serve_vllm.sh qwen38  # YaRN factor 2.0
-python3 scripts/bench/bench_long_context_recall.py --lengths 384000 475000
+MAX_MODEL_LEN=524288 bash scripts/02_serve_vllm.sh qwen38
+python3 scripts/bench/bench_long_context_recall.py --lengths 256000 475000
 ```
 
-**Measure**: recall at 384K/475K. If 384K drops → 512K is emergency ceiling only.
-Determine soft compaction threshold (256K/320K/384K).
+Validated: 512K YaRN server startup/health and KV capacity. Pending: the
+256K/512K-class exact-recall ladder. Until that finishes, 512K is a validated
+serving ceiling, not a fully validated quality ceiling; correctness-sensitive
+production can pin `MAX_MODEL_LEN=262144`.
 
-## Gate G10: Real agent replay
+## Gate G10: Real agent replay — PASS
 
 ```bash
-python3 scripts/bench/bench_agent_trace.py 30 20000     # 30-turn agent
+python3 scripts/bench/bench_agent_trace.py 30 20000
 python3 scripts/bench/bench_session_concurrency.py --sessions 8 --rounds 4
 python3 scripts/bench/bench_session_concurrency.py --sessions 16 --rounds 4
+python3 scripts/bench/bench_tool_roundtrip.py --rounds 5 --mode auto --prefix-tokens 20000
 ```
 
-**Measure**: cache hit %, per-turn TTFT, end-to-end session completion time.
-This gate decides the production engine (vLLM vs SGLang).
+Measured: 30-turn prefix-cache hit 84%, warm TTFT below 2.5 s in the trace, and
+5/5 tool-call round trips.
 
-## Post-validation
+## Remaining validation work
 
-Replace all estimates in `docs/PERFORMANCE.md` with real numbers.
-Record commit hash + manifest + launch args alongside each result.
+1. G6 BF16-KV vs FP8-KV correctness/capacity A/B.
+2. G9 256K/512K-class long-context exact recall.
+3. Optional scheduler/isolation sweeps (`MAX_BATCHED_TOKENS` 2048/4096/8192).
+4. Record every new real-machine result in `docs/PERFORMANCE.md`; keep estimates
+   and methodology in `docs/RESEARCH_NOTES.md`.

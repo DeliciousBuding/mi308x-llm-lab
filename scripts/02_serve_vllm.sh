@@ -52,15 +52,14 @@ fi
 export VLLM_ROCM_USE_AITER="${VLLM_ROCM_USE_AITER:-1}"
 
 # Attention backend / block size for the full-attention (GQA, head_dim=256)
-# layers. G1 finding (2026-08-17): the ROCm custom paged kernel only supports
-# head_size 64/128 and block_size 16/32, so with head_dim=256 it falls back to
-# Triton and decode is GEMM-bound (~54 tok/s). The AITER FA backend supports
-# head_size 256 (needs block 16/32); ROCM_AITER_UNIFIED_ATTN needs block%16==0
-# (prefers 64). Sweep in G3:
-#   ATTENTION_BACKEND=ROCM_AITER_FA       BLOCK_SIZE=16
-#   ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN BLOCK_SIZE=64
-ATTENTION_BACKEND="${ATTENTION_BACKEND:-}"
-BLOCK_SIZE="${BLOCK_SIZE:-256}"
+# layers. G3 validation (2026-08-18): the default ROCm path rejects head_dim=256
+# and falls back to Triton. ROCM_AITER_UNIFIED_ATTN + block 64 removes that
+# fallback and improves decode by 13-35%, so it is the validated default.
+# Override ATTENTION_BACKEND/BLOCK_SIZE only for controlled A/B benchmarks.
+# Use `${VAR-default}` (not `:-`) so `ATTENTION_BACKEND=` explicitly selects
+# the automatic/control path without passing --attention-backend.
+ATTENTION_BACKEND="${ATTENTION_BACKEND-ROCM_AITER_UNIFIED_ATTN}"
+BLOCK_SIZE="${BLOCK_SIZE:-64}"
 
 # ---------------------------------------------------------------------------
 # Model path resolution (prefer ephemeral local hot copy when complete)
@@ -145,7 +144,10 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
 MAX_BATCHED_TOKENS="${MAX_BATCHED_TOKENS:-3072}"
 LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-1024}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.95}"
-KV_OFFLOAD_GB="${KV_OFFLOAD_GB:-12}"
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
+# G-gate validation: native CPU-KV offload crashes with madvise(EINVAL) in the
+# DSW sandbox. GPU-only KV is the safe default; non-zero is an explicit A/B.
+KV_OFFLOAD_GB="${KV_OFFLOAD_GB:-0}"
 KV_CACHE_BYTES="${KV_CACHE_BYTES:-16000000000}"
 
 EXTRA_ARGS=()
@@ -177,9 +179,10 @@ fi
 # ---------------------------------------------------------------------------
 # MTP speculative decoding (native multi-token prediction, NOT DSpark)
 # ---------------------------------------------------------------------------
-# MTP default OFF for correctness reference (Gate G1).
-# Sweep native / MTP-1 / MTP-2 / MTP-3 on GPU before locking.
-MTP_ENABLED="${MTP_ENABLED:-0}"
+# G5 validation (2026-08-18) promoted MTP-3: ~65% acceptance, 94.2 tok/s at C1,
+# and 1094 tok/s aggregate at C32. Set MTP_ENABLED=0 only for a native-decode
+# control benchmark.
+MTP_ENABLED="${MTP_ENABLED:-1}"
 MTP_K="${MTP_K:-3}"
 SPEC_ARGS=()
 if [ "$MTP_ENABLED" = "1" ]; then
@@ -218,7 +221,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "[model] $MODEL_PATH -> $SERVED_MODEL_NAME (quant=$QUANT, shards=$SHARD_COUNT)"
 echo "[scheduler] max_model_len=$MAX_MODEL_LEN max_num_seqs=$MAX_NUM_SEQS max_batched_tokens=$MAX_BATCHED_TOKENS long_prefill_cap=$LONG_PREFILL_TOKEN_THRESHOLD"
-echo "[runtime] gpu_memory_utilization=$GPU_MEMORY_UTILIZATION host=$HOST port=$PORT block_size=$BLOCK_SIZE attention_backend=${ATTENTION_BACKEND:-auto}"
+echo "[runtime] gpu_memory_utilization=$GPU_MEMORY_UTILIZATION kv_cache_dtype=$KV_CACHE_DTYPE host=$HOST port=$PORT block_size=$BLOCK_SIZE attention_backend=${ATTENTION_BACKEND:-auto}"
 
 ATTN_ARGS=()
 if [ -n "$ATTENTION_BACKEND" ]; then
@@ -235,7 +238,7 @@ exec vllm serve "$MODEL_PATH" \
   --trust-remote-code \
   --generation-config vllm \
   --tensor-parallel-size 1 \
-  --kv-cache-dtype fp8 \
+  --kv-cache-dtype "$KV_CACHE_DTYPE" \
   --block-size "$BLOCK_SIZE" \
   --enable-prefix-caching \
   --max-model-len "$MAX_MODEL_LEN" \
