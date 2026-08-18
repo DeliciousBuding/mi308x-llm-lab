@@ -57,17 +57,19 @@ auto-prefers the local hot copy. Skippable if NFS read latency is acceptable.
 ## 5. Serve Qwen3.8-27B (vLLM — the validated path)
 
 vLLM is the validated production path (G-gate campaign, 2026-08-18). SGLang was
-evaluated and **abandoned** for Qwen3.8: `sgl_kernel` ships CUDA-only wheels
+evaluated and **retired** for Qwen3.8: `sgl_kernel` ships CUDA-only wheels
 (`libnvrtc.so.13`), so SGLang cannot install on ROCm without Docker, and DSW
-has no Docker. `02_serve_sglang.sh` is retained for reference only.
+has no Docker. `02_serve_sglang.sh` is retained for reference only and refuses to run unless `ALLOW_RETIRED_SGLANG=1`.
 
 ```bash
-# In shell 1:
+# In shell 1. Production settings are already encoded in the launcher defaults.
 export VLLM_API_KEY_FILE=/mnt/workspace/.bootstrap/vllm_api_key
-ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN BLOCK_SIZE=64 \
-MTP_ENABLED=1 MTP_K=3 KV_OFFLOAD_GB=0 MAX_MODEL_LEN=524288 \
-  bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/02_serve_vllm.sh qwen38
+bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/02_serve_vllm.sh qwen38
 ```
+
+Production means native 256K, MTP-3, 16K total scheduler budget, 1K long-prefill
+cap, Vision enabled (up to four images), FP8 GPU-only KV, and default non-thinking.
+Do not copy experimental 512K or scheduler overrides into the normal restore path.
 
 Wait for `/health` to return 200 (check with `curl -s http://localhost:8000/health`).
 
@@ -123,8 +125,10 @@ client → public HTTPS endpoint (Cloudflare Tunnel) → LiteLLM → vLLM   (Ope
 Studio UI → local SSH forward only, not publicly exposed
 ```
 
-LiteLLM normalizes: `max_tokens` alias folding, output ceiling clamp
-(`MAX_OUTPUT_TOKENS_CEILING=65536`), null-field stripping.
+LiteLLM normalizes the OpenAI Chat boundary for Qwen (token aliases, output
+ceiling, system/developer roles, thinking aliases, named/structured tool edge
+cases, and null history fields). The authoritative behavior matrix lives in the
+private `infra/docs/AGENT_CHAT_CONTRACT.md`; do not duplicate that contract here.
 
 ## 8. Validation (follow VALIDATION_PLAN.md gates)
 
@@ -137,14 +141,12 @@ python3 /mnt/workspace/qwen3-8-27b-mi308x/scripts/bench/bench_full.py decode
 python3 /mnt/workspace/qwen3-8-27b-mi308x/scripts/bench/bench_tool_roundtrip.py \
   --rounds 5 --mode auto --prefix-tokens 20000
 
-# MTP vs native A/B
-# (with MTP-3, note the decode rate and MTP acceptance from logs)
+# Controlled experiments only — not part of normal restore/startup:
+# MTP-off control (requires an intentional maintenance window)
 MTP_ENABLED=0 bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/02_serve_vllm.sh qwen38
-python3 /mnt/workspace/qwen3-8-27b-mi308x/scripts/bench/bench_full.py decode
 
-# YaRN 512K extension (after 262K native is validated)
+# Optional 512K YaRN quality experiment, only after native-256K recall is green
 MAX_MODEL_LEN=524288 bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/02_serve_vllm.sh qwen38
-python3 /mnt/workspace/qwen3-8-27b-mi308x/scripts/bench/bench_full.py all
 ```
 
 ## 9. Full benchmark suite
@@ -158,16 +160,23 @@ Record new real-machine results in `docs/PERFORMANCE.md`, update gate status in 
 ## Quick reference: serve config knobs
 
 ```bash
-MAX_MODEL_LEN=524288          # YaRN factor 2.0 over 262K native
-MAX_NUM_SEQS=32               # conservative (GDN state + 80-CU); 64 for batch
-MAX_BATCHED_TOKENS=3072       # coding-agent latency profile
-MTP_ENABLED=1                 # 1=MTP-3 (latency); 0=native (throughput)
-MTP_K=3                       # MTP depth; 1 regresses at high concurrency
+MAX_MODEL_LEN=262144          # native production ceiling; 512K YaRN is experimental
+MAX_NUM_SEQS=32
+MAX_BATCHED_TOKENS=16384      # promoted 5-10 Agent total scheduler budget
+LONG_PREFILL_TOKEN_THRESHOLD=1024  # protects unrelated short-request TTFT
+MTP_ENABLED=1
+MTP_K=3
 ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN  # required: head_dim=256
 BLOCK_SIZE=64
+KV_CACHE_DTYPE=fp8
 KV_OFFLOAD_GB=0               # GPU-only; CPU offload unstable for Qwen3.8
-QUANT=bf16                     # bf16 (reference) or fp8 (max KV headroom)
-LANGUAGE_MODEL_ONLY=1          # skip vision encoder for text-only serving
+QUANT=bf16                    # checkpoint weights; independent from KV dtype
+LANGUAGE_MODEL_ONLY=0         # keep native Vision encoder enabled
+MM_IMAGE_LIMIT=4
+MM_VIDEO_LIMIT=0
+DEFAULT_ENABLE_THINKING=0
+MM_ALLOWED_MEDIA_DOMAINS=media.invalid     # arbitrary remote media denied by default
+VLLM_MEDIA_URL_ALLOW_REDIRECTS=0
 GPU_MEMORY_UTILIZATION=0.95
 ```
 

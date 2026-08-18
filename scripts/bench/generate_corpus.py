@@ -5,7 +5,7 @@ Generates fixed, reproducible prompts at various context lengths for benchmarkin
 Uses deterministic seeds — no randomness, same output every run.
 
 Generates:
-  - Context padding prompts: 1K / 8K / 32K / 128K / 256K / 512K tokens
+  - Context padding prompts: 1K / 8K / 32K / 128K / 256K by default
   - Multi-needle recall prompts (5 needles at varying depths)
   - Agent trace prefix (20K repo context + system prompt)
   - Branching agent prefix (shared 80K → fork 8 children)
@@ -113,11 +113,11 @@ def main() -> int:
     parser.add_argument("--output-dir", default="/tmp/bench_corpus",
                         help="output directory for corpus files")
     parser.add_argument("--lengths", type=int, nargs="+",
-                        default=[1024, 8192, 32768, 131072, 262144, 524288],
-                        help="context lengths to generate")
+                        default=[1024, 8192, 32768, 131072, 262144],
+                        help="context lengths to generate; pass 524288 explicitly for optional YaRN research")
     parser.add_argument("--needles", type=int, nargs="+",
-                        default=[32000, 128000, 256000, 384000, 475000],
-                        help="multi-needle lengths to generate")
+                        default=[32000, 128000, 240000],
+                        help="multi-needle lengths to generate; pass 256000 384000 475000 explicitly for YaRN research")
     parser.add_argument("--agent-prefix", type=int, default=20000,
                         help="agent trace prefix tokens")
     args = parser.parse_args()

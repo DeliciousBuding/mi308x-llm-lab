@@ -1,5 +1,10 @@
 # SGLang 0.5.17 CLI Capability Snapshot
 
+> **Status: RETIRED / reference-only for Qwen on this DSW ROCm stack.** The
+> available `sgl_kernel` dependency is CUDA-only and DSW has no Docker path for
+> the AMD image. Production and future validation use vLLM; this snapshot is kept
+> only to preserve the research record.
+>
 > Extracted from the actual `sglang-0.5.17-cp312-cp312-manylinux_2_34_x86_64.whl`
 > by parsing `sglang/srt/server_args.py`. Do not rely on SGLang `main` docs —
 > they drift. This file is the ground truth for the installed wheel.

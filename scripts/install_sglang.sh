@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install_sglang.sh — install SGLang 0.5.17 for Qwen3.8-27B on ROCm (gfx942)
+# install_sglang.sh — RETIRED Qwen3.8 SGLang research installer for ROCm (gfx942)
+#
+# The current DSW path is unsupported because the required sgl_kernel wheel is
+# CUDA-only. vLLM is production. This installer remains only for reproducible
+# historical research and requires an explicit opt-in.
 #
 # SGLang is installed with --no-deps to skip NVIDIA-specific packages
 # (flashinfer, flash-attn-4, nvidia-cutlass-dsl, etc.). The ROCm-compatible
@@ -16,6 +20,12 @@
 # Idempotent: wheels are reinstalled; system Python / system torch are never replaced.
 # =============================================================================
 set -euo pipefail
+
+if [ "${ALLOW_RETIRED_SGLANG:-0}" != "1" ]; then
+  echo "ERROR: Qwen SGLang install path is retired/unsupported on this DSW ROCm stack." >&2
+  echo "Use scripts/install_vllm_nightly.sh. Set ALLOW_RETIRED_SGLANG=1 only for offline research." >&2
+  exit 2
+fi
 
 VENV="${SGLANG_VENV:-/root/.venvs/sglang}"
 WHEELS="${WHEELS:-/mnt/workspace/wheels}"

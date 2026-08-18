@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # Serve Qwen3.8-27B with SGLang on ROCm (gfx942 / MI308X / MI300X).
 #
-# SGLang is an EXPERIMENTAL CANDIDATE for Qwen3.8-27B on AMD.
-# vLLM (02_serve_vllm.sh) is the production baseline.
-# Real agent-loop A/B on GPU decides the winner.
+# RETIRED / UNSUPPORTED for this DSW ROCm deployment.
+# The available sgl_kernel dependency is CUDA-only (libnvrtc.so.13), while DSW
+# has no Docker path for the AMD image. vLLM (02_serve_vllm.sh) is production.
+# This file is retained only as research/reference material.
 #
 # Key correction (2026-08-17): SGLang on AMD MI GPUs must use `no_buffer`
 # Mamba Radix Cache strategy — the `extra_buffer` branching-point GDN state
 # caching is NVIDIA-only. This weakens SGLang's cross-request GDN state
 # caching advantage on AMD. See RESEARCH_NOTES.md §9 for details.
 #
-# SGLang still offers: Triton GDN kernels, ReplaySSM for MTP, --mamba-ssm-dtype,
-# Anthropic-compatible endpoint. These are worth testing but not assumed superior.
+# Historical capability notes below are retained to explain the abandoned A/B;
+# they are not a recommendation to revive this serving path.
 #
 # This script is secret-neutral and does not generate/persist API keys.
 set -euo pipefail
+
+if [ "${ALLOW_RETIRED_SGLANG:-0}" != "1" ]; then
+  echo "ERROR: Qwen SGLang path is retired/unsupported on this DSW ROCm stack." >&2
+  echo "Use scripts/02_serve_vllm.sh. Set ALLOW_RETIRED_SGLANG=1 only for offline research." >&2
+  exit 2
+fi
 
 if [ "$#" -gt 0 ] && [ "$1" != "qwen38" ] && [ "$1" != "qwen3.8-27b" ]; then
   echo "ERROR: this launcher only serves Qwen3.8-27B; remove model selector '$1'." >&2
@@ -41,7 +48,7 @@ else
   echo "[sglang] using system SGLang (unverified control path)"
 fi
 
-if ! command -v sglang >/dev/null 2>&1 && ! command -v python3 -c "import sglang" >/dev/null 2>&1; then
+if ! command -v sglang >/dev/null 2>&1 && ! python3 -c "import sglang" >/dev/null 2>&1; then
   echo "ERROR: sglang not found" >&2
   echo "Run: bash scripts/install_sglang.sh" >&2
   exit 1
@@ -80,7 +87,7 @@ fi
 # ---------------------------------------------------------------------------
 # YaRN RoPE scaling for 512K context (factor 2.0 over 262K native)
 # ---------------------------------------------------------------------------
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
 if [ "$MAX_MODEL_LEN" -gt 262144 ]; then
   YARN_FACTOR="${YARN_FACTOR:-2.0}"
   echo "[yarn] factor=$YARN_FACTOR max_model_len=$MAX_MODEL_LEN (native=262144)"
@@ -98,17 +105,16 @@ fi
 # cache. See: sgl-project/sglang docs_new/cookbook/autoregressive/Qwen/Qwen3.5.mdx
 #
 # This weakens SGLang's primary advantage on AMD (cross-request GDN state
-# caching). SGLang is now an EXPERIMENTAL CANDIDATE, not the recommended engine.
-# vLLM is the production baseline. Real agent-loop A/B decides the winner.
+# caching). The A/B was closed in favor of vLLM; keep these knobs only so the
+# retired experiment remains reproducible when explicitly opted in.
 #
 # --mamba-full-memory-ratio: SGLang default is 0.9. Do NOT hardcode a lower
 # value here — let the user sweep it. 0.9 = balanced; lower = more KV, less
 # GDN state pool. The ratio depends on avg context length and concurrency.
 #
 # --mamba-ssm-dtype: default follows model config (float32). BF16 halves the
-# GDN state pool but MAY have cumulative numerical drift at 200K+ context.
-# Test FP32 (correctness reference) vs BF16 (production candidate) on
-# 128K/256K/384K/512K recall + agent replay.
+# GDN state pool but MAY have cumulative numerical drift at long context.
+# Historical research control: FP32 vs BF16 on recall + agent replay.
 MAMBA_FULL_MEMORY_RATIO="${MAMBA_FULL_MEMORY_RATIO:-0.9}"
 MAMBA_SSM_DTYPE="${MAMBA_SSM_DTYPE:-float32}"
 MAMBA_RADIX_CACHE_STRATEGY="${MAMBA_RADIX_CACHE_STRATEGY:-no_buffer}"

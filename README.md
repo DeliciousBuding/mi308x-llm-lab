@@ -14,13 +14,16 @@ Native 256K production context · optional 512K YaRN experiment · MTP-3 specula
 </div>
 
 > **Status: validated on MI308X (2026-08-18).** The production vLLM path is
-> validated on the 192 GB gfx942 host: G0/G1/G3/G5/G7/G8/G10 passed, while G9
-> has validated 512K YaRN startup + KV capacity but not the 256K/512K recall
-> ladder. G6 (BF16-vs-FP8 KV) remains pending; the SGLang-only G2/G4 path is
+> validated on the 192 GB gfx942 host: G0/G1/G3/G5/G7/G8/G10 passed. G9 has
+> validated 512K YaRN startup + KV capacity, while native-256K exact recall is
+> still the production-quality gate; 512K quality is optional. G6 KV
+> precision/scale quality remains pending; the SGLang-only G2/G4 path is
 > blocked on ROCm and is not part of the production recipe. Real-machine
 > numbers are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Headline results:
-> MTP-3 acceptance ~65%, C1 decode 94.2 tok/s, C32 aggregate 1094 tok/s,
-> 30-turn agent prefix-cache hit 84%, tool-call round-trip 5/5. The original
+> final production warmup C1 decode ~100-101.5 tok/s (the original G5 sweep was
+> 94.2 tok/s), C32 aggregate 1094 tok/s in the G5 concurrency campaign, final
+> C8/C10 long-history decode ~33.6/~31.3 tok/s per session, and exact-64K
+> short-request interference ~+1.35 s. The original
 > pre-deployment estimates in [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md)
 > are retained for methodology but are superseded by measured results where
 > the two differ.
@@ -180,32 +183,24 @@ MTP: method=mtp, num_speculative_tokens=3 (acceptance ~65%)
 KV_OFFLOAD_GB=0                           (GPU-only KV; CPU offload unstable)
 ```
 
-### A/B without editing the launcher
+### Controlled A/B overrides (maintenance experiments only)
+
+The launcher already contains the production values above. Override **one variable
+at a time** only for a recorded validation gate; never copy experiment values into
+the normal restore command.
 
 ```bash
-MAX_MODEL_LEN=524288
-MAX_NUM_SEQS=32
-MAX_BATCHED_TOKENS=16384
-MTP_ENABLED=1
-MTP_K=3
-ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN
-BLOCK_SIZE=64
-KV_OFFLOAD_GB=0       # GPU-only; CPU offload unstable for Qwen3.8
-GPU_MEMORY_UTILIZATION=0.95
-QUANT=bf16            # or fp8
-```
-
-Examples:
-
-```bash
-# Disable MTP for native-decode baseline (throughput-bound high-batch control)
+# Native-decode control for G5/MTP regression checks
 MTP_ENABLED=0 bash scripts/02_serve_vllm.sh qwen38
 
-# FP8 weights for maximum KV headroom
-QUANT=fp8 bash scripts/02_serve_vllm.sh qwen38
+# Model-dtype/BF16 KV control for G6
+KV_CACHE_DTYPE=auto bash scripts/02_serve_vllm.sh qwen38
 
-# Throughput profile (faster 500K endpoint, worse cold-isolation tail)
-MAX_BATCHED_TOKENS=4096 bash scripts/02_serve_vllm.sh qwen38
+# Optional YaRN quality experiment after native-256K recall is green
+MAX_MODEL_LEN=524288 bash scripts/02_serve_vllm.sh qwen38
+
+# Text-only control to quantify Vision overhead; not the production profile
+LANGUAGE_MODEL_ONLY=1 bash scripts/02_serve_vllm.sh qwen38
 ```
 
 ## Environment variables
@@ -219,6 +214,11 @@ MAX_BATCHED_TOKENS=4096 bash scripts/02_serve_vllm.sh qwen38
 | `VLLM_VENV` | `<local-disk>/.venvs/vllm-qwen` | active serving venv |
 | `QUANT` | `bf16` | checkpoint variant (`bf16` or `fp8`) |
 | `KV_CACHE_DTYPE` | `fp8` | KV cache dtype; use `auto` for the pending model-dtype/BF16 G6 control |
+| `MAX_MODEL_LEN` | `262144` | native production context ceiling; `524288` is an explicit YaRN experiment |
+| `MAX_BATCHED_TOKENS` | `16384` | promoted total scheduler budget for 5-10 Agent traffic |
+| `LONG_PREFILL_TOKEN_THRESHOLD` | `1024` | per-long-request prefill cap; protects short-request latency |
+| `MM_IMAGE_LIMIT` / `MM_VIDEO_LIMIT` | `4` / `0` | bounded Vision input policy |
+| `DEFAULT_ENABLE_THINKING` | `0` | Agent/tool traffic defaults to non-thinking; requests may override |
 | `VLLM_API_KEY` / `VLLM_API_KEY_FILE` | *(unset)* | optional serving/client auth |
 | `VLLM_BASE_URL` | `http://127.0.0.1:8000` | benchmark client endpoint |
 

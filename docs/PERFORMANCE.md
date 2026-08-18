@@ -324,13 +324,12 @@ arguments. No raw chat-template leakage.
 [x] G3  attention backend A/B          UNIFIED_ATTN wins (+13.5% C1, +34.6% long)
 [ ] G4  SSM dtype A/B                 (SGLang-only; blocked)
 [x] G5  MTP-3 speculative decode       94.2 tok/s C1, C32 agg=1094 (exceeds native ceiling)
-[ ] G6  BF16 KV vs FP8 KV
+[ ] G6  KV precision/scale quality matrix
 [x] G7  concurrency knee C1..C32      C32=34.2 tok/s, agg=1094; knee ~C8 interactive
 [x] G8  context scaling 32K/128K      warm 128K=5.0s (cold 374s was JIT, not prefill)
 [x] G10 agent trace 30-turn           cache hit 84%, warm TTFT <2.5s, decode 82.5, tool 5/5
-[~] G9  512K YaRN startup/capacity       server PASS; 256K/512K recall ladder still pending
+[~] G9  native-256K recall + optional YaRN   512K startup/capacity PASS; native-256K quality pending
 ```
-
 
 ## Production scheduler promotion — 2026-08-18 evening
 
