@@ -4,7 +4,7 @@
 
 **Qwen3.8-27B (dense, hybrid attention) on a single AMD Instinct MI300X / MI308X (gfx942), served with native vLLM on ROCm.**
 
-512K configured context (YaRN factor 2.0) · MTP-3 speculative decode · prefix caching · agentic-coding workload target · no Docker required · upstream-native (no fork patches)
+Native 256K production context · optional 512K YaRN experiment · MTP-3 speculative decode · prefix caching · agentic-coding workload target · no Docker required · upstream-native (no fork patches)
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![ROCm](https://img.shields.io/badge/ROCm-7.2-red)](https://rocm.docs.amd.com/)
@@ -166,9 +166,10 @@ defaults now match the validated runtime: UNIFIED_ATTN + block 64, MTP-3, and
 --kv-cache-dtype fp8
 --enable-prefix-caching
 --max-num-seqs 32                         (interactive) / 64 (batch)
---max-num-batched-tokens 3072             (coding-agent latency profile)
+--max-num-batched-tokens 16384            (5-10 Agent production profile)
+--long-prefill-token-threshold 1024         (short-request isolation / fairness)
 --tensor-parallel-size 1
-Vision encoder enabled; `--limit-mm-per-prompt {"image":1,"video":0}`
+Vision encoder enabled; `--limit-mm-per-prompt {"image":4,"video":0}`; remote HTTP(S) media deny-by-default
 --default-chat-template-kwargs '{"enable_thinking":false}'
 --reasoning-parser qwen3
 --tool-call-parser qwen3_coder
@@ -184,7 +185,7 @@ KV_OFFLOAD_GB=0                           (GPU-only KV; CPU offload unstable)
 ```bash
 MAX_MODEL_LEN=524288
 MAX_NUM_SEQS=32
-MAX_BATCHED_TOKENS=3072
+MAX_BATCHED_TOKENS=16384
 MTP_ENABLED=1
 MTP_K=3
 ATTENTION_BACKEND=ROCM_AITER_UNIFIED_ATTN

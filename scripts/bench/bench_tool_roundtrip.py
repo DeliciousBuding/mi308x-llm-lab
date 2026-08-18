@@ -50,7 +50,7 @@ def run_tool_roundtrip(mode: str, prefix_tokens: int) -> dict:
     ]
     extra = {
         "tools": [TOOL_DEFINITION],
-        "tool_choice": mode if mode != "auto" else "auto",
+        "tool_choice": mode,
     }
 
     first_response = stream_completion(messages, max_tokens=256, temperature=0.0, extra=extra)
@@ -66,7 +66,14 @@ def run_tool_roundtrip(mode: str, prefix_tokens: int) -> dict:
     # Feed back a tool result
     messages.append({"role": "assistant", "content": first_response["content"], "tool_calls": tool_calls})
     tool_result_content = 'File src/config.py contains:\nDATABASE_URL = "localhost:5432"\nDEBUG = True'
-    messages.append({"role": "tool", "content": tool_result_content})
+    tool_call_id = tool_calls[0].get("id")
+    if not tool_call_id:
+        return {
+            "passed": False,
+            "reason": "tool call missing id",
+            "content": first_response["content"][:120],
+        }
+    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": tool_result_content})
 
     final_response = stream_completion(messages, max_tokens=256, temperature=0.0)
     return {
@@ -89,7 +96,7 @@ def run_tool_roundtrip(mode: str, prefix_tokens: int) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Tool-call round-trip benchmark")
     parser.add_argument("--rounds", type=int, default=5, help="number of rounds")
-    parser.add_argument("--mode", choices=["auto", "forced", "required"], default="auto", help="tool_choice mode")
+    parser.add_argument("--mode", choices=["auto", "required"], default="auto", help="OpenAI Chat tool_choice mode")
     parser.add_argument("--prefix-tokens", type=int, default=20000, help="prefix context tokens")
     args = parser.parse_args()
 

@@ -330,3 +330,59 @@ arguments. No raw chat-template leakage.
 [x] G10 agent trace 30-turn           cache hit 84%, warm TTFT <2.5s, decode 82.5, tool 5/5
 [~] G9  512K YaRN startup/capacity       server PASS; 256K/512K recall ladder still pending
 ```
+
+
+## Production scheduler promotion — 2026-08-18 evening
+
+Final production A/B was repeated on the Vision-enabled native-256K profile with
+MTP-3, FP8 KV, UNIFIED_ATTN, block 64, async scheduling, and 4-image support.
+The promoted scheduler is:
+
+```text
+max_num_batched_tokens=16384
+long_prefill_token_threshold=1024
+max_num_seqs=32
+```
+
+The key finding is that **the per-long-request chunk cap controls interactive
+fairness; the total scheduler budget controls multi-Agent decode headroom**.
+Increasing the long-prefill cap to 2048 was a three-way regression, while
+increasing only the total budget from 8192 to 16384 preserved isolation.
+
+| Profile | C8 steady TTFT | C8 decode/session | C10 steady TTFT | C10 decode/session | 64K short-request added TTFT |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8192 / 1024 | 11.97s | 35.7 tok/s | 14.12s | 24.3 tok/s | ~+1.38s |
+| **16384 / 1024** | **12.20s** | **33.6 tok/s** | **15.92s** | **31.3 tok/s** | **+1.35s** |
+| 16384 / 2048 | 12.25s | 33.7 tok/s | — | — | +3.01s |
+| 12288 / 1024 | — | — | 15.92s | 32.9 tok/s | — |
+
+The 12288 middle point did not improve steady C10 latency and added another
+compile/JIT shape, so it is not retained. 16384/1024 is promoted because it
+keeps C8 behavior in the same band as 8192/1024 while restoring the C10
+per-session decode floor above 30 tok/s. The 64K isolation fixture is tokenizer-
+calibrated: actual prompts were ~64,016 tokens.
+
+### MTP control on the promoted scheduler
+
+The final production shape was rechecked with and without MTP rather than relying
+on the earlier scheduler profile:
+
+| Mode | C1 decode-512 | C8 aggregate |
+| --- | ---: | ---: |
+| native / no MTP | 56.2 tok/s | 231.2 tok/s |
+| **MTP-3** | **99.7 tok/s** | **387.9 tok/s** |
+
+MTP-3 remains decisively positive. The measured 512-token run accepted about 69%
+of proposed draft tokens, while the short C8 fixture observed ~83% acceptance.
+
+### Hybrid-prefix limit
+
+The runtime expands the physical hybrid attention/Mamba page to **1600 tokens**
+in align mode. Current dev306 exposes `mamba_block_size` and
+`prefix_match_unit`, but neither can make align-mode Mamba checkpoints denser:
+`mamba_block_size` is overwritten to the physical cache block in align mode and
+`prefix_match_unit` changes hash matching granularity only. Consequently the
+remaining ~12-16s simultaneous long-history C8/C10 TTFT is a current hybrid-cache
+implementation limit, not an untried launcher knob. Future vLLM upgrades should
+be evaluated specifically for denser/retained Mamba checkpoints and newer
+partial-prefill scheduling before changing this profile.

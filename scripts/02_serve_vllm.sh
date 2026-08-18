@@ -36,6 +36,11 @@ MM_IMAGE_LIMIT="${MM_IMAGE_LIMIT:-4}"
 MM_VIDEO_LIMIT="${MM_VIDEO_LIMIT:-0}"
 MM_PROCESSOR_CACHE_GB="${MM_PROCESSOR_CACHE_GB:-2}"
 MM_PROCESSOR_CACHE_TYPE="${MM_PROCESSOR_CACHE_TYPE:-lru}"
+# Public Agent traffic should use data URLs/base64 by default. A reserved
+# non-resolving domain makes HTTP(S) media deny-by-default; deployments that
+# need remote media can explicitly provide a space-separated allowlist.
+MM_ALLOWED_MEDIA_DOMAINS="${MM_ALLOWED_MEDIA_DOMAINS:-media.invalid}"
+export VLLM_MEDIA_URL_ALLOW_REDIRECTS="${VLLM_MEDIA_URL_ALLOW_REDIRECTS:-0}"
 DEFAULT_ENABLE_THINKING="${DEFAULT_ENABLE_THINKING:-0}"
 
 VENV_DIR="${VLLM_VENV:-/root/.venvs/vllm-qwen}"
@@ -144,10 +149,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Scheduler / decode profile (ported from the DeepSeek-V4-Flash 3072 default)
+# Scheduler / decode profile (promoted from native-256K multi-Agent A/B)
 # ---------------------------------------------------------------------------
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
-MAX_BATCHED_TOKENS="${MAX_BATCHED_TOKENS:-3072}"
+MAX_BATCHED_TOKENS="${MAX_BATCHED_TOKENS:-16384}"
 LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-1024}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.95}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
@@ -167,7 +172,7 @@ else
 fi
 
 # Multimodal policy. Production keeps vision enabled but bounds accidental media
-# fan-out from agent clients to one image and no video per prompt. Text-only mode
+# fan-out from agent clients to four images and no video per prompt. Text-only mode
 # remains available as a controlled benchmark profile.
 if [ "$LANGUAGE_MODEL_ONLY" = "1" ]; then
   EXTRA_ARGS+=(--language-model-only)
@@ -176,7 +181,12 @@ else
   EXTRA_ARGS+=(--limit-mm-per-prompt "{\"image\":${MM_IMAGE_LIMIT},\"video\":${MM_VIDEO_LIMIT}}")
   EXTRA_ARGS+=(--mm-processor-cache-gb "$MM_PROCESSOR_CACHE_GB")
   EXTRA_ARGS+=(--mm-processor-cache-type "$MM_PROCESSOR_CACHE_TYPE")
+  if [ -n "$MM_ALLOWED_MEDIA_DOMAINS" ]; then
+    read -r -a _MEDIA_DOMAINS <<< "$MM_ALLOWED_MEDIA_DOMAINS"
+    EXTRA_ARGS+=(--allowed-media-domains "${_MEDIA_DOMAINS[@]}")
+  fi
   echo "[vision] enabled; image_limit=$MM_IMAGE_LIMIT video_limit=$MM_VIDEO_LIMIT mm_cache=${MM_PROCESSOR_CACHE_GB}GiB/$MM_PROCESSOR_CACHE_TYPE"
+  echo "[vision] remote_media=$MM_ALLOWED_MEDIA_DOMAINS redirects=$VLLM_MEDIA_URL_ALLOW_REDIRECTS"
 fi
 
 # Qwen thinking is enabled by the upstream chat template unless told otherwise.
@@ -271,6 +281,7 @@ exec vllm serve "$MODEL_PATH" \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
   --enable-auto-tool-choice \
+  --exclude-tools-when-tool-choice-none \
   --enable-prompt-tokens-details \
   "${SPEC_ARGS[@]}" \
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \

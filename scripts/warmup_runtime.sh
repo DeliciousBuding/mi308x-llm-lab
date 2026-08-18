@@ -19,9 +19,9 @@ curl -fsS "$BASE_URL/health" >/dev/null
 echo "[warmup] short decode path"
 python3 "$ROOT/scripts/bench/bench_full.py" decode
 
-echo "[warmup] 20K forced tool/prefill/parser path"
+echo "[warmup] 20K required-tool/prefill/parser path"
 python3 "$ROOT/scripts/bench/bench_tool_roundtrip.py" \
-  --rounds 1 --mode forced --prefix-tokens 20000
+  --rounds 1 --mode required --prefix-tokens 20000
 
 if [ "$SNAPSHOT_AFTER_WARMUP" = "1" ]; then
   echo "[warmup] snapshotting validated runtime state"

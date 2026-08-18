@@ -81,6 +81,25 @@ def main() -> int:
     if flydsl_probe.returncode != 0 or "flydsl= 0.2.4" not in flydsl_probe.stdout or "aiter_flydsl= True" not in flydsl_probe.stdout:
         failures.append("flydsl 0.2.4 is required for AITER vision/long-prefix kernels")
 
+    print("\n=== Qwen3 tool-parser whitespace safety ===")
+    parser_probe = subprocess.run(
+        [str(py), "-c", r"""
+import json
+from vllm.parser.qwen3 import _qwen3_arg_converter
+raw = '<parameter=value>  keep-leading-and-trailing  </parameter>'
+parsed = json.loads(_qwen3_arg_converter(raw, partial=False))
+assert parsed['value'] == '  keep-leading-and-trailing  ', repr(parsed['value'])
+wrapped = '<parameter=value>\n  keep-inner-space  \n</parameter>'
+parsed2 = json.loads(_qwen3_arg_converter(wrapped, partial=False))
+assert parsed2['value'] == '  keep-inner-space  ', repr(parsed2['value'])
+print('qwen3_arg_whitespace=preserved')
+"""],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    print(parser_probe.stdout.strip())
+    if parser_probe.returncode != 0 or "qwen3_arg_whitespace=preserved" not in parser_probe.stdout:
+        failures.append("Qwen3 tool parser strips meaningful argument whitespace; exact-match coding tools are unsafe")
+
     print("\n=== Qwen3.8 architecture registration ===")
     arch_probe = subprocess.run(
         [str(py), "-c", """
