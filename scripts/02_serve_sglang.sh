@@ -26,7 +26,6 @@ fi
 # ---------------------------------------------------------------------------
 MODEL_BASE_EXPLICIT="${MODEL_BASE+x}"
 MODEL_BASE="${MODEL_BASE:-/mnt/workspace/models}"
-RECIPE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-27b}"
