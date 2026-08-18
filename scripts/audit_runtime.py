@@ -123,20 +123,18 @@ if not found:
     print("\n=== Gated DeltaNet linear-attention path ===")
     fla_probe = subprocess.run(
         [str(py), "-c", """
-# The Gated DeltaNet FLA kernels are Triton-based and work on ROCm.
-# Verify the fla (flash-linear-attention) ops module imports without error.
-try:
-    from vllm.attention.backends.utils import is_torch_available
-    print(f"  Triton available: {is_torch_available()}")
-except ImportError:
-    pass
-# Directly check the delta-rule kernel path if present
-try:
-    import importlib
-    mod = importlib.import_module("vllm.attention.ops.triton_fla")
-    print("  OK       triton_fla ops module imported")
-except ImportError as exc:
-    print(f"  WARN     triton_fla import: {exc}")
+# dev306 moved the Qwen Gated DeltaNet implementation under the v1 GDN
+# backend plus the vendored flash-linear-attention package. Import the paths
+# actually exercised by the validated Qwen3.8 runtime rather than a retired
+# pre-v1 triton_fla module name.
+import importlib
+for module_name in (
+    "vllm.third_party.flash_linear_attention.ops",
+    "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn",
+    "vllm.v1.attention.backends.gdn_attn",
+):
+    importlib.import_module(module_name)
+    print(f"  OK       {module_name}")
 """],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
     )
