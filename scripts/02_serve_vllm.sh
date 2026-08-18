@@ -32,7 +32,7 @@ QUANT="${QUANT:-bf16}"
 # Production defaults keep the vision encoder enabled for coding-agent screenshots.
 # Set LANGUAGE_MODEL_ONLY=1 only for controlled text-throughput / max-KV A/B runs.
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
-MM_IMAGE_LIMIT="${MM_IMAGE_LIMIT:-1}"
+MM_IMAGE_LIMIT="${MM_IMAGE_LIMIT:-4}"
 MM_VIDEO_LIMIT="${MM_VIDEO_LIMIT:-0}"
 MM_PROCESSOR_CACHE_GB="${MM_PROCESSOR_CACHE_GB:-2}"
 MM_PROCESSOR_CACHE_TYPE="${MM_PROCESSOR_CACHE_TYPE:-lru}"
@@ -240,7 +240,7 @@ fi
 # Launch
 # ---------------------------------------------------------------------------
 echo "[model] $MODEL_PATH -> $SERVED_MODEL_NAME (quant=$QUANT, shards=$SHARD_COUNT)"
-echo "[scheduler] max_model_len=$MAX_MODEL_LEN max_num_seqs=$MAX_NUM_SEQS max_batched_tokens=$MAX_BATCHED_TOKENS long_prefill_cap=$LONG_PREFILL_TOKEN_THRESHOLD"
+echo "[scheduler] max_model_len=$MAX_MODEL_LEN max_num_seqs=$MAX_NUM_SEQS max_batched_tokens=$MAX_BATCHED_TOKENS long_prefill_cap=$LONG_PREFILL_TOKEN_THRESHOLD async=on stream_interval=1"
 echo "[runtime] gpu_memory_utilization=$GPU_MEMORY_UTILIZATION kv_cache_dtype=$KV_CACHE_DTYPE host=$HOST port=$PORT block_size=$BLOCK_SIZE attention_backend=${ATTENTION_BACKEND:-auto}"
 
 ATTN_ARGS=()
@@ -265,6 +265,8 @@ exec vllm serve "$MODEL_PATH" \
   --max-num-seqs "$MAX_NUM_SEQS" \
   --max-num-batched-tokens "$MAX_BATCHED_TOKENS" \
   --long-prefill-token-threshold "$LONG_PREFILL_TOKEN_THRESHOLD" \
+  --async-scheduling \
+  --stream-interval 1 \
   --linear-backend auto \
   --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
