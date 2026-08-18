@@ -29,8 +29,14 @@ SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-27b}"
 QUANT="${QUANT:-bf16}"
 
 # The Qwen3.8-27B checkpoint is multimodal by design (vision_config in config.json).
-# For text-only agentic serving we skip the vision encoder to save HBM for KV.
-LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-1}"
+# Production defaults keep the vision encoder enabled for coding-agent screenshots.
+# Set LANGUAGE_MODEL_ONLY=1 only for controlled text-throughput / max-KV A/B runs.
+LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
+MM_IMAGE_LIMIT="${MM_IMAGE_LIMIT:-1}"
+MM_VIDEO_LIMIT="${MM_VIDEO_LIMIT:-0}"
+MM_PROCESSOR_CACHE_GB="${MM_PROCESSOR_CACHE_GB:-2}"
+MM_PROCESSOR_CACHE_TYPE="${MM_PROCESSOR_CACHE_TYPE:-lru}"
+DEFAULT_ENABLE_THINKING="${DEFAULT_ENABLE_THINKING:-0}"
 
 VENV_DIR="${VLLM_VENV:-/root/.venvs/vllm-qwen}"
 if [ -z "${USE_SYSTEM_VLLM:-}" ] && [ -x "$VENV_DIR/bin/vllm" ]; then
@@ -159,15 +165,29 @@ else
   echo "[kv-offload] disabled (GPU-only)"
 fi
 
-# Language-model-only: skip the vision encoder for text-only serving. This
-# frees HBM that the vision tower would otherwise occupy, increasing KV capacity.
-# The architecture is Qwen3_5ForConditionalGeneration; --language-model-only
-# extracts the text decoder path.
+# Multimodal policy. Production keeps vision enabled but bounds accidental media
+# fan-out from agent clients to one image and no video per prompt. Text-only mode
+# remains available as a controlled benchmark profile.
 if [ "$LANGUAGE_MODEL_ONLY" = "1" ]; then
   EXTRA_ARGS+=(--language-model-only)
   echo "[vision] skipped (language-model-only); text decoder path"
 else
-  echo "[vision] full multimodal model loaded (vision encoder active)"
+  EXTRA_ARGS+=(--limit-mm-per-prompt "{\"image\":${MM_IMAGE_LIMIT},\"video\":${MM_VIDEO_LIMIT}}")
+  EXTRA_ARGS+=(--mm-processor-cache-gb "$MM_PROCESSOR_CACHE_GB")
+  EXTRA_ARGS+=(--mm-processor-cache-type "$MM_PROCESSOR_CACHE_TYPE")
+  echo "[vision] enabled; image_limit=$MM_IMAGE_LIMIT video_limit=$MM_VIDEO_LIMIT mm_cache=${MM_PROCESSOR_CACHE_GB}GiB/$MM_PROCESSOR_CACHE_TYPE"
+fi
+
+# Qwen thinking is enabled by the upstream chat template unless told otherwise.
+# Default it off for general/coding-agent traffic so max-token truncation cannot
+# consume the whole response inside <think>. Request-level chat_template_kwargs
+# or reasoning_effort still override this server default in vLLM.
+if [ "$DEFAULT_ENABLE_THINKING" = "1" ]; then
+  EXTRA_ARGS+=(--default-chat-template-kwargs '{"enable_thinking":true}')
+  echo "[thinking] enabled by default (request-level override still supported)"
+else
+  EXTRA_ARGS+=(--default-chat-template-kwargs '{"enable_thinking":false}')
+  echo "[thinking] disabled by default (request-level override still supported)"
 fi
 
 # YaRN overrides (if set)
