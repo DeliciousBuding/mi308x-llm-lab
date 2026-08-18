@@ -8,7 +8,7 @@
 # Triton-based and optimized for gfx942 (vllm-project/vllm#41446).
 #
 # Prerequisites (paths overridable via env):
-#   1. wheels downloaded to $WHEELS (vLLM dev306 ROCm, AITER 0.1.19)
+#   1. wheels downloaded to $WHEELS (vLLM dev306 ROCm, AITER 0.1.19, flydsl 0.2.4)
 #   2. venv created by scripts/env_setup.sh
 #
 # Usage: bash install_vllm_nightly.sh
@@ -45,19 +45,22 @@ echo ""
 echo "===== [2/6] locate exact wheels ====="
 AITER_WHL="$(ls "$WHEELS"/amd_aiter-0.1.19-*.whl 2>/dev/null | head -1 || true)"
 VLLM_WHL="$(ls "$WHEELS"/vllm-0.26.1rc1.dev306+*.whl 2>/dev/null | head -1 || true)"
+FLYDSL_WHL="$(ls "$WHEELS"/flydsl-0.2.4-*.whl 2>/dev/null | head -1 || true)"
 [ -n "$AITER_WHL" ] || { echo "ERROR: missing AITER wheel in $WHEELS"; exit 1; }
 [ -n "$VLLM_WHL" ]  || { echo "ERROR: missing vLLM dev306 wheel in $WHEELS"; exit 1; }
+[ -n "$FLYDSL_WHL" ] || { echo "ERROR: missing flydsl 0.2.4 wheel in $WHEELS"; exit 1; }
 echo "AITER:  $AITER_WHL"
 echo "vLLM:   $VLLM_WHL"
+echo "flydsl: $FLYDSL_WHL"
 
 "$PY" -c "import zipfile,sys; [zipfile.ZipFile(f).testzip() and sys.exit(1) for f in sys.argv[1:]]" \
-  "$AITER_WHL" "$VLLM_WHL"
+  "$AITER_WHL" "$VLLM_WHL" "$FLYDSL_WHL"
 echo "wheel ZIP integrity OK"
 
 echo ""
 echo "===== [3/6] install wheels into isolated venv ====="
 export PYTHONDONTWRITEBYTECODE=1
-"$PIP" install --no-deps --ignore-installed --no-compile "$AITER_WHL" "$VLLM_WHL"
+"$PIP" install --no-deps --ignore-installed --no-compile "$AITER_WHL" "$VLLM_WHL" "$FLYDSL_WHL"
 
 echo ""
 echo "===== [4/6] install transformers >= 5.8.0 ====="
@@ -91,6 +94,7 @@ echo ""
 echo "===== [6/6] version check + persist snapshot ====="
 "$PY" -c 'import vllm; print("vllm", vllm.__version__)'
 "$PY" -c 'import importlib.metadata as m, aiter; print("AITER", m.version("amd-aiter"))'
+"$PY" -c 'import flydsl; from aiter.ops.flydsl import is_flydsl_available; assert flydsl.__version__.startswith("0.2.4"), flydsl.__version__; assert is_flydsl_available(); print("flydsl", flydsl.__version__, "OK")'
 
 echo ""
 echo "=============================================="

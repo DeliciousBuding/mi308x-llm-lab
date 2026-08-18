@@ -67,6 +67,20 @@ def main() -> int:
     except Exception as exc:
         failures.append(f"AITER import check error: {exc}")
 
+    flydsl_probe = subprocess.run(
+        [str(py), "-c", (
+            "import flydsl; "
+            "from aiter.ops.flydsl import is_flydsl_available; "
+            "print('flydsl=', flydsl.__version__); "
+            "print('aiter_flydsl=', is_flydsl_available())"
+        )],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    print("\n=== FlyDSL runtime ===")
+    print(flydsl_probe.stdout.strip())
+    if flydsl_probe.returncode != 0 or "flydsl= 0.2.4" not in flydsl_probe.stdout or "aiter_flydsl= True" not in flydsl_probe.stdout:
+        failures.append("flydsl 0.2.4 is required for AITER vision/long-prefix kernels")
+
     print("\n=== Qwen3.8 architecture registration ===")
     arch_probe = subprocess.run(
         [str(py), "-c", """
