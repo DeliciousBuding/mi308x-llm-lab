@@ -126,12 +126,13 @@ fi
 find /dev/shm -maxdepth 1 -type f -name 'vllm_offload_*.mmap' -delete 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# YaRN RoPE scaling for 512K context (factor 2.0 over 262K native)
+# Context policy: native 256K for production agent/tool-loop traffic.
 # ---------------------------------------------------------------------------
-# Qwen3.8-27B natively supports 262,144 tokens. For 512K we apply YaRN with
-# factor=2.0. The override is nested under text_config (not flat like the MoE).
-# See docs/RESEARCH_NOTES.md §8.1 and the HF model card.
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-524288}"
+# Qwen3.8-27B natively supports 262,144 tokens. Keep that native ceiling as the
+# production default: it avoids unnecessary YaRN complexity and focuses tuning
+# on TTFT, prefix-cache reuse, interactive concurrency, and decode. Longer
+# contexts remain an explicit A/B override only.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
 if [ "$MAX_MODEL_LEN" -gt 262144 ]; then
   YARN_FACTOR="${YARN_FACTOR:-2.0}"
   HF_OVERRIDES="${HF_OVERRIDES:-{\"text_config\": {\"rope_parameters\": {\"mrope_interleaved\": true, \"mrope_section\": [11, 11, 10], \"rope_type\": \"yarn\", \"rope_theta\": 10000000, \"partial_rotary_factor\": 0.25, \"factor\": $YARN_FACTOR, \"original_max_position_embeddings\": 262144}}}}"
