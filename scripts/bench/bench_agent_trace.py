@@ -20,7 +20,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from bench_client import chat_completion, health_check, stream_completion
+from bench_client import chat_completion, health_check, repeated_text_for_tokens, stream_completion
 
 SYSTEM_PROMPT = (
     "You are an expert coding agent. Follow repository conventions, prefer "
@@ -45,8 +45,8 @@ REPO_CONTEXT_UNIT = (
 )
 
 
-def make_repo_context(target_tokens: int) -> str:
-    return REPO_CONTEXT_UNIT * max(1, target_tokens // 40)
+def make_repo_context(target_tokens: int, prefix: str = "") -> tuple[str, int]:
+    return repeated_text_for_tokens(REPO_CONTEXT_UNIT, target_tokens, prefix=prefix)
 
 
 def run_agent_trace(num_turns: int, prefix_tokens: int, cold_prefix: bool = False) -> int:
@@ -54,11 +54,8 @@ def run_agent_trace(num_turns: int, prefix_tokens: int, cold_prefix: bool = Fals
         print("ERROR: server not healthy")
         return 1
 
-    repo_context = make_repo_context(prefix_tokens)
-    if cold_prefix:
-        # Salt the first cache block so a previous deterministic benchmark run
-        # cannot make turn 1 look artificially warm.
-        repo_context = f"cold-prefix-{time.time_ns()}\n" + repo_context
+    prefix_salt = f"cold-prefix-{time.time_ns()}\n" if cold_prefix else ""
+    repo_context, calibrated_prefix_tokens = make_repo_context(prefix_tokens, prefix=prefix_salt)
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": repo_context + "\n\nHelp me understand this codebase."},
@@ -69,7 +66,10 @@ def run_agent_trace(num_turns: int, prefix_tokens: int, cold_prefix: bool = Fals
     total_completion_tokens = 0
     total_decode_time = 0.0
 
-    print(f"=== agent trace: {num_turns} turns, {prefix_tokens} prefix tokens ===")
+    print(
+        f"=== agent trace: {num_turns} turns, target={prefix_tokens} prefix tokens, "
+        f"tokenizer_calibrated={calibrated_prefix_tokens} ==="
+    )
 
     for turn_index in range(1, num_turns + 1):
         user_message = (

@@ -18,14 +18,17 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from bench_client import chat_completion, health_check
+from bench_client import chat_completion, health_check, repeated_text_for_tokens
 
 
 def run_isolation_round(prefix_tokens: int) -> dict:
     nonce = f"iso-{prefix_tokens}-{random.randint(0, 999999)}"
-    long_filler = (
-        f"Repository context block {nonce}: detailed parser and service "
-        f"descriptions for measuring cold prefill isolation. " * (prefix_tokens // 16)
+    filler_unit = (
+        "Repository context block: detailed parser and service descriptions "
+        "for measuring cold prefill isolation. "
+    )
+    long_filler, calibrated_prefix_tokens = repeated_text_for_tokens(
+        filler_unit, prefix_tokens, prefix=f"{nonce}\n"
     )
     short_prompt = f"Reply with OK. (nonce {nonce})"
 
@@ -48,15 +51,17 @@ def run_isolation_round(prefix_tokens: int) -> dict:
             [{"role": "user", "content": short_prompt}],
             8,
         )
-        short_result = short_future.result()
+        short_future.result()
         short_isolated_ttft = time.time() - short_start
-        long_future.result()
+        long_result = long_future.result()
 
     added_ttft = short_isolated_ttft - baseline_ttft
     return {
         "baseline_ttft": baseline_ttft,
         "isolated_ttft": short_isolated_ttft,
         "added_ttft": added_ttft,
+        "calibrated_prefix_tokens": calibrated_prefix_tokens,
+        "actual_prompt_tokens": long_result["prompt_tokens"],
     }
 
 
@@ -76,7 +81,9 @@ def main() -> int:
         result = run_isolation_round(args.prefix_tokens)
         added_ttf.append(result["added_ttft"])
         print(
-            f"  round {round_index}: baseline={result['baseline_ttft']:.3f}s, "
+            f"  round {round_index}: calibrated_prefix={result['calibrated_prefix_tokens']} "
+            f"actual_prompt={result['actual_prompt_tokens']} "
+            f"baseline={result['baseline_ttft']:.3f}s, "
             f"isolated={result['isolated_ttft']:.3f}s, "
             f"added={result['added_ttft']:+.3f}s"
         )

@@ -132,4 +132,20 @@ The local `bench_agent_trace.py` is being extended with `--cold-prefix` for that
 
 Latest vLLM exposes `max_num_partial_prefills` and `max_long_partial_prefills`, including the documented pattern `max_long_partial_prefills < max_num_partial_prefills` so short prompts can jump ahead of long prefills. The pinned ROCm dev306 runtime does **not** contain these SchedulerConfig fields or CLI arguments. Do not upgrade the validated ROCm runtime solely for this feature; record it as a future upgrade gate.
 
-Next safe A/B: keep total budget 8192 and test intermediate long-prefill caps (4096, then 2048 if isolation is still excessive).
+Next safe A/B: keep total budget 8192 and test intermediate long-prefill caps.
+
+### Intermediate cap results
+
+`long_prefill_token_threshold=4096`:
+
+- first salted ~20K agent turn: 14.38 s TTFT (included first-use 4096-prefill JIT); later turns mostly 1.36–1.53 s with align-boundary spikes
+- long-prefill isolation, two rounds: added TTFT **+10.095 / +9.945 s**, average **+10.020 s** → reject
+
+`long_prefill_token_threshold=2048`:
+
+- long-prefill isolation, two rounds: added TTFT **+3.018 / +2.963 s**, average **+2.990 s** → still above the +2 s production gate
+- startup reuses the 8192 compile profile: ~31 s engine init, 122.0 GiB KV, 3,443,019-token KV capacity
+
+The isolation fixture currently labels its generated prefix by an approximate target; `/metrics` shows the `64000` fixture can actually tokenize to roughly 120K. Treat the 0/4096/2048 measurements as controlled relative A/B results, not exact 64K absolute latency. The benchmark must be corrected to report tokenizer-measured input length.
+
+Next candidate: **1600 tokens**, matching the hybrid attention/Mamba aligned cache page size observed at runtime.

@@ -76,6 +76,39 @@ def _headers() -> dict[str, str]:
     return headers
 
 
+def tokenize_count(text: str) -> int:
+    """Return the backend tokenizer's exact token count for plain prompt text."""
+    body = json.dumps({"model": MODEL_NAME, "prompt": text}).encode()
+    request = urllib.request.Request(
+        BASE_URL + "/tokenize",
+        data=body,
+        headers=_headers(),
+    )
+    response = json.load(urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT))
+    return int(response["count"])
+
+
+def repeated_text_for_tokens(unit: str, target_tokens: int, prefix: str = "") -> tuple[str, int]:
+    """Scale repeated fixture text against the actual server tokenizer.
+
+    The returned count covers the plain text only; chat-template overhead is
+    intentionally reported separately by completion ``usage.prompt_tokens``.
+    """
+    if target_tokens <= 0:
+        return prefix, tokenize_count(prefix)
+    unit_count = max(1, tokenize_count(unit))
+    repeats = max(1, target_tokens // unit_count)
+    text = prefix + unit * repeats
+    count = tokenize_count(text)
+    for _ in range(4):
+        if abs(count - target_tokens) <= max(16, target_tokens // 500):
+            break
+        repeats = max(1, round(repeats * target_tokens / max(1, count)))
+        text = prefix + unit * repeats
+        count = tokenize_count(text)
+    return text, count
+
+
 def chat_completion(
     messages: list[dict],
     max_tokens: int = 64,
