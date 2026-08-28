@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to qwen3-8-mi308x!
+Thanks for your interest in contributing to the Qwen3.8 line of mi308x-llm-lab!
 
 This repository is a production recipe for serving Qwen3.8-27B on a single AMD
 Instinct MI308X / MI300X-class (gfx942) accelerator. Contributions in any of
