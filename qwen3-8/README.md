@@ -13,10 +13,12 @@ Two profiles, one upstream-native stack: Qwen3.8-27B (dense hybrid attention, va
 
 </div>
 
-> **Repository scope (2026-08-29).** Renamed from `qwen3-8-27b-mi308x` (GitHub
-> redirects the old name): this repository is the home of the Qwen3.8 series on
-> gfx942. Both models share one upstream-native vLLM stack, one benchmark suite,
-> and one serving venv; the single 192 GB card serves one model at a time.
+> **Qwen3.8 line (2026-08-29).** Formerly the standalone repositories
+> `qwen3-8-27b-mi308x` / `qwen3-8-mi308x`, merged into `mi308x-llm-lab` on
+> 2026-08-29 (GitHub redirects the old names). This directory is the home of
+> the Qwen3.8 series on gfx942. Both models share one upstream-native vLLM
+> stack, one benchmark suite, and one serving venv; the single 192 GB card
+> serves one model at a time.
 >
 > **Qwen3.8-27B — validated, frozen (2026-08-18).** Production vLLM path
 > validated on the 192 GB gfx942 host: G0/G1/G3/G5/G7/G8/G10 passed. G9
@@ -111,7 +113,7 @@ capacity even at the 1M-context extension on a single GPU.
 
 ### Contrast with the sibling DeepSeek-V4-Flash recipe
 
-The sibling repo `deepseek-v4-flash-mi308x` serves a MoE model with MLA
+The sibling directory [`deepseek-v4-flash/`](../deepseek-v4-flash/README.md) serves a MoE model with MLA
 (Multi-head Latent Attention). This repository serves a **dense** model with
 **standard GQA on 16 layers + linear attention on 48 layers**. Key differences:
 

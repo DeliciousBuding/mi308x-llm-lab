@@ -28,7 +28,7 @@ Skip this step if `restore_runtime.sh` reported "Qwen3.8 venv already present"
 or "Qwen3.8 venv restored".
 
 ```bash
-cd /mnt/workspace/qwen3-8-mi308x
+cd /mnt/workspace/mi308x-llm-lab/qwen3-8
 bash scripts/env_setup.sh
 bash scripts/install_vllm_nightly.sh
 ```
@@ -39,7 +39,7 @@ the dev306 wheel before declaring success. No fork overlays are applied.
 ## 3. Audit the runtime
 
 ```bash
-python3 /mnt/workspace/qwen3-8-mi308x/scripts/audit_runtime.py
+python3 /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/audit_runtime.py
 ```
 
 Must report `AUDIT PASSED` before proceeding. Checks vLLM version, AITER
@@ -48,7 +48,7 @@ import, Qwen3.8 architecture registration, and GDN linear-attention path.
 ## 4. Stage model to local SSD (recommended)
 
 ```bash
-bash /mnt/workspace/qwen3-8-mi308x/scripts/stage_model_local.sh
+bash /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/stage_model_local.sh
 ```
 
 Copies the 52 GB BF16 checkpoint from NFS to local SSD. The launcher
@@ -64,7 +64,7 @@ has no Docker. `02_serve_sglang.sh` is retained for reference only and refuses t
 ```bash
 # In shell 1. Production settings are already encoded in the launcher defaults.
 export VLLM_API_KEY_FILE=/mnt/workspace/.bootstrap/vllm_api_key
-bash /mnt/workspace/qwen3-8-mi308x/scripts/02_serve_vllm.sh qwen38
+bash /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/02_serve_vllm.sh qwen38
 ```
 
 Production means native 256K, MTP-3, 16K total scheduler budget, 1K long-prefill
@@ -85,7 +85,7 @@ The two non-obvious knobs (see README "Known ROCm gotchas"):
 ```bash
 # In shell 2, after /health is ready:
 SNAPSHOT_AFTER_WARMUP=1 \
-  bash /mnt/workspace/qwen3-8-mi308x/scripts/warmup_runtime.sh
+  bash /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/warmup_runtime.sh
 ```
 
 Covers real first-use JIT paths (Gated DeltaNet Triton kernels, MTP) and
@@ -135,24 +135,24 @@ private `infra/docs/AGENT_CHAT_CONTRACT.md`; do not duplicate that contract here
 ```bash
 # Quick smoke test
 curl -s http://localhost:8000/health
-python3 /mnt/workspace/qwen3-8-mi308x/scripts/bench/bench_full.py decode
+python3 /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/bench/bench_full.py decode
 
 # Tool-call round-trip
-python3 /mnt/workspace/qwen3-8-mi308x/scripts/bench/bench_tool_roundtrip.py \
+python3 /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/bench/bench_tool_roundtrip.py \
   --rounds 5 --mode auto --prefix-tokens 20000
 
 # Controlled experiments only — not part of normal restore/startup:
 # MTP-off control (requires an intentional maintenance window)
-MTP_ENABLED=0 bash /mnt/workspace/qwen3-8-mi308x/scripts/02_serve_vllm.sh qwen38
+MTP_ENABLED=0 bash /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/02_serve_vllm.sh qwen38
 
 # Optional 512K YaRN quality experiment, only after native-256K recall is green
-MAX_MODEL_LEN=524288 bash /mnt/workspace/qwen3-8-mi308x/scripts/02_serve_vllm.sh qwen38
+MAX_MODEL_LEN=524288 bash /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/02_serve_vllm.sh qwen38
 ```
 
 ## 9. Full benchmark suite
 
 ```bash
-bash /mnt/workspace/qwen3-8-mi308x/scripts/03_benchmark.sh
+bash /mnt/workspace/mi308x-llm-lab/qwen3-8/scripts/03_benchmark.sh
 ```
 
 Record new real-machine results in `docs/PERFORMANCE.md`, update gate status in `docs/VALIDATION_PLAN.md`, and keep pre-deployment estimates/methodology in `docs/RESEARCH_NOTES.md` as historical research context.

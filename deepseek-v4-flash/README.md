@@ -14,10 +14,9 @@
 </div>
 
 > **Status: frozen and merged (2026-08-29).** This recipe is complete and in
-> maintenance-only mode; no new experiments are planned. The repository content
-> and full history now live in
-> [`mi308x-llm-lab`](https://github.com/DeliciousBuding/mi308x-llm-lab) under
-> `deepseek-v4-flash/`; this standalone repository is archived.
+> maintenance-only mode; no new experiments are planned. This directory was
+> merged from the former standalone repository `deepseek-v4-flash-mi308x`
+> (now archived on GitHub); its full history is preserved in place.
 
 This repository is a **reproducible serving recipe and benchmark harness** for
 `deepseek-ai/DeepSeek-V4-Flash-0731` on one 192 GB-class gfx942 GPU. The primary
@@ -115,8 +114,8 @@ time.
 ### 1. Pin the patch source
 
 ```bash
-git clone https://github.com/DeliciousBuding/deepseek-v4-flash-mi308x.git
-cd deepseek-v4-flash-mi308x
+git clone https://github.com/DeliciousBuding/mi308x-llm-lab.git
+cd mi308x-llm-lab/deepseek-v4-flash
 bash scripts/prepare_patch_repo.sh
 ```
 
