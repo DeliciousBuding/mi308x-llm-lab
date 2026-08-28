@@ -40,7 +40,7 @@ fi
 
 if ! command -v sglang >/dev/null 2>&1; then
   echo "ERROR: sglang not found" >&2
-  echo "Run: bash /mnt/workspace/qwen3-8-27b-mi308x/scripts/install_sglang.sh" >&2
+  echo "Run: bash /mnt/workspace/qwen3-8-mi308x/scripts/install_sglang.sh" >&2
   exit 1
 fi
 

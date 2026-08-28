@@ -13,6 +13,12 @@
 
 </div>
 
+> **Status: frozen and merged (2026-08-29).** This recipe is complete and in
+> maintenance-only mode; no new experiments are planned. The repository content
+> and full history now live in
+> [`mi308x-llm-lab`](https://github.com/DeliciousBuding/mi308x-llm-lab) under
+> `deepseek-v4-flash/`; this standalone repository is archived.
+
 This repository is a **reproducible serving recipe and benchmark harness** for
 `deepseek-ai/DeepSeek-V4-Flash-0731` on one 192 GB-class gfx942 GPU. The primary
 workload is a **long-lived coding agent**: large stable prefix, growing multi-turn
