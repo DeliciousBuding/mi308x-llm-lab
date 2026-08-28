@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Download/resume the official Qwen3.8-27B checkpoint from ModelScope (or Hugging Face).
+# Download/resume official Qwen3.8 checkpoints from ModelScope (or Hugging Face).
 #
 # Usage:
-#   bash scripts/01_download_model.sh qwen38-bf16   # 55.6 GB, 18 shards
-#   bash scripts/01_download_model.sh qwen38-fp8     # ~28 GB, FP8 variant
+#   bash scripts/01_download_model.sh qwen38-bf16     # 55.6 GB, 18 shards
+#   bash scripts/01_download_model.sh qwen38-fp8      # ~28 GB, FP8 variant
+#   bash scripts/01_download_model.sh flashnext-fp8   # ~185.6 GB, 131 shards
 set -euo pipefail
 
 SELECTOR="${1:-qwen38-bf16}"
@@ -16,8 +17,12 @@ case "$SELECTOR" in
     MODEL_ID="${MODEL_ID:-Qwen/Qwen3.8-27B-FP8}"
     EXPECTED_SHARDS="${EXPECTED_SHARDS:-0}"
     ;;
+  flashnext-fp8)
+    MODEL_ID="${MODEL_ID:-Qwen/Qwen3.8-Flash-Next-FP8}"
+    EXPECTED_SHARDS="${EXPECTED_SHARDS:-131}"
+    ;;
   *)
-    echo "Usage: $0 qwen38-bf16 | qwen38-fp8" >&2
+    echo "Usage: $0 qwen38-bf16 | qwen38-fp8 | flashnext-fp8" >&2
     exit 2
     ;;
 esac

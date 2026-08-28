@@ -23,7 +23,7 @@ WORKSPACE = Path(os.environ.get("WORKSPACE_ROOT", "/mnt/workspace"))
 WHEELS_DIR = WORKSPACE / "wheels"
 MODELS_DIR = WORKSPACE / "models"
 REPOS = [
-    "qwen3-8-27b-mi308x",
+    "qwen3-8-mi308x",
     "deepseek-v4-flash-mi308x",
     "deepseek-v4-flash-mi300x",
     "deepseek-v4-flash-studio",
@@ -34,6 +34,7 @@ REPOS = [
 MODEL_PATHS = [
     ("DeepSeek-V4-Flash-0731", "deepseek-ai/DeepSeek-V4-Flash-0731"),
     ("Qwen3.8-27B", "Qwen/Qwen3.8-27B"),
+    ("Qwen3.8-Flash-Next-FP8", "Qwen/Qwen3.8-Flash-Next-FP8"),
 ]
 
 

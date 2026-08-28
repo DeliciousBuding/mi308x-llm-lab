@@ -1,10 +1,10 @@
-# qwen3-8-27b-mi308x
+# qwen3-8-mi308x
 
 <div align="center">
 
-**Qwen3.8-27B (dense, hybrid attention) on a single AMD Instinct MI300X / MI308X (gfx942), served with native vLLM on ROCm.**
+**Qwen3.8 series on a single AMD Instinct MI300X / MI308X (gfx942), served with native vLLM on ROCm.**
 
-Native 256K production context · optional 512K YaRN experiment · MTP-3 speculative decode · prefix caching · agentic-coding workload target · no Docker required · upstream-native (no fork patches)
+Two profiles, one upstream-native stack: Qwen3.8-27B (dense hybrid attention, validated) · Qwen3.8-Flash-Next (125B MoE + Qwen Sparse Attention, FP8, in preparation) · MTP speculative decode · prefix caching · agentic-coding workload target · no Docker required · no fork patches
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![ROCm](https://img.shields.io/badge/ROCm-7.2-red)](https://rocm.docs.amd.com/)
@@ -13,20 +13,80 @@ Native 256K production context · optional 512K YaRN experiment · MTP-3 specula
 
 </div>
 
-> **Status: validated on MI308X (2026-08-18).** The production vLLM path is
-> validated on the 192 GB gfx942 host: G0/G1/G3/G5/G7/G8/G10 passed. G9 has
-> validated 512K YaRN startup + KV capacity, while native-256K exact recall is
-> still the production-quality gate; 512K quality is optional. G6 KV
-> precision/scale quality remains pending; the SGLang-only G2/G4 path is
-> blocked on ROCm and is not part of the production recipe. Real-machine
-> numbers are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). Headline results:
-> final production warmup C1 decode ~100-101.5 tok/s (the original G5 sweep was
-> 94.2 tok/s), C32 aggregate 1094 tok/s in the G5 concurrency campaign, final
-> C8/C10 long-history decode ~33.6/~31.3 tok/s per session, and exact-64K
-> short-request interference ~+1.35 s. The original
-> pre-deployment estimates in [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md)
-> are retained for methodology but are superseded by measured results where
-> the two differ.
+> **Repository scope (2026-08-29).** Renamed from `qwen3-8-27b-mi308x` (GitHub
+> redirects the old name): this repository is the home of the Qwen3.8 series on
+> gfx942. Both models share one upstream-native vLLM stack, one benchmark suite,
+> and one serving venv; the single 192 GB card serves one model at a time.
+>
+> **Qwen3.8-27B — validated, frozen (2026-08-18).** Production vLLM path
+> validated on the 192 GB gfx942 host: G0/G1/G3/G5/G7/G8/G10 passed. G9
+> validated 512K YaRN startup + KV capacity; the native-256K recall ladder and
+> the G6 KV precision/scale control were not completed and are no longer
+> pursued. The SGLang-only G2/G4 path is blocked on ROCm (`sgl_kernel` is
+> CUDA-only) and is not part of the recipe. Headline results: final production
+> warmup C1 decode ~100-101.5 tok/s, C32 aggregate 1094 tok/s, C8/C10
+> long-history decode ~33.6/~31.3 tok/s per session, exact-64K short-request
+> interference ~+1.35 s. Real-machine numbers in
+> [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md); the pre-deployment estimates in
+> [`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md) are retained for
+> methodology only.
+>
+> **Qwen3.8-Flash-Next — in preparation (2026-08-29).** Weights staging and
+> repo consolidation done; engine support and gfx942 validation pending. See the
+> [Flash-Next profile section](#qwen38-flash-next-profile-in-preparation).
+
+## Qwen3.8-Flash-Next profile (in preparation)
+
+Qwen3.8-Flash-Next (released 2026-08-26) is the open-weight preview of the
+upcoming Qwen4 architecture: an ultra-sparse multimodal MoE with a 125B main
+model (6B activated per token), a 51B N-gram embedding table, a 4B MTP head,
+and hybrid Gated DeltaNet + Qwen Sparse Attention (QSA).
+
+```text
+layers             48 = 12 x (3 x GDN -> MoE + 1 x QSA -> MoE)
+experts            512 (10 routed + 1 shared active per token)
+n-gram embedding   51B bigram/trigram lookup at layer 2
+QSA                24 Q heads / 2 KV heads, head_dim 256,
+                   indexer budget 512 blocks / 2048 tokens
+context            262,144 native, YaRN-extensible to ~1M
+MTP                1 layer, multi-step (native speculative decode)
+```
+
+### Checkpoint choice: FP8-only on one 192 GB card
+
+| checkpoint | size | single gfx942 card (205.8 GB VRAM) |
+| --- | ---: | --- |
+| BF16 | ~335 GiB | does not fit |
+| **FP8** (official) | **~172.8 GiB** | fits, ~20 GB headroom for KV/activations |
+
+```bash
+bash scripts/01_download_model.sh flashnext-fp8   # ~185.6 GB, 131 shards
+```
+
+QSA KV stays compact (2 KV heads on 12/48 layers ≈ 12 KiB/token), so the
+remaining headroom still supports long-context sessions.
+
+### Engine status (2026-08-29, not yet run on this host)
+
+- Model support requires vLLM containing
+  [vllm-project/vllm#53896](https://github.com/vllm-project/vllm/pull/53896)
+  (optionally #53899 for PLE offload). The dev306 wheel validated for
+  Qwen3.8-27B **predates this model**; the serving venv must be upgraded and
+  SHA-pinned before first launch.
+- The official [vLLM recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-Flash-Next)
+  validates GB300 / GB200 / H200 and MI355X (BF16 only). **gfx942 is not yet
+  validated** — the QSA attention kernels and indexer are the main unknowns.
+  The QSA layers also use head_dim 256, the same shape the ROCm custom
+  paged-attention kernel rejects on Qwen3.8-27B (see Known ROCm gotchas).
+- N-gram embedding offload (PLE, `VLLM_PLE_CPU_OFFLOAD=1`) is NVIDIA-only at
+  the moment, so on AMD the full 51B embedding table must live in HBM — that
+  is what makes the FP8 memory budget tight.
+- Single-card TP1 has no official validation (the recipe's validated minimum is
+  TP2 on GB300); expect the first-launch matrix to be exploratory.
+
+Recipe starting point (unvalidated here): `--gpu-memory-utilization 0.90
+--max-num-seqs 256 --enable-prefix-caching --tool-call-parser qwen3_xml
+--reasoning-parser qwen3`.
 
 ## Why Qwen3.8-27B on gfx942
 
